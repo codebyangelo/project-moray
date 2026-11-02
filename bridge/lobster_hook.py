@@ -116,6 +116,12 @@ class MorayHook:
         self.mock_mode: bool = mock_mode
         self._mock_table: dict[int, MorayQuarantineEntry] = {}
 
+        # Anti-Traversal Invariant: Reject symbolic links to prevent state redirection
+        if os.path.islink(self.map_path):
+            raise MorayQuarantineError(
+                f"Symlink map path rejected for security (anti-traversal invariant): {self.map_path}"
+            )
+
         if not self.mock_mode and not os.path.exists(self.map_path):
             self.mock_mode = True
 
@@ -240,6 +246,9 @@ class MorayHook:
 
     # Internal atomic persistence with file locking and size clamping
     def _sync_mock_file(self) -> None:
+        if os.path.islink(self.map_path):
+            raise MorayQuarantineError(f"Symlink map path rejected for security: {self.map_path}")
+
         try:
             target_dir = os.path.dirname(self.map_path)
             if target_dir:
@@ -260,6 +269,10 @@ class MorayHook:
     def _load_mock_file(self) -> None:
         if not os.path.exists(self.map_path):
             return
+
+        if os.path.islink(self.map_path):
+            raise MorayQuarantineError(f"Symlink map path rejected for security: {self.map_path}")
+
         try:
             sz = os.path.getsize(self.map_path)
             if sz > MAX_MAP_FILE_BYTES:

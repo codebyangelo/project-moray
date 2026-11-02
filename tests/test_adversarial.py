@@ -165,3 +165,39 @@ class TestDaemonPathBoundary:
             or "File name too long" in res.stderr
             or "Cannot access" in res.stderr
         )
+
+
+class TestSymlinkAndPathTraversalAttacks:
+    """Adversarial symlink manipulation and path traversal defenses."""
+
+    def test_symlink_map_path_rejected_on_init(self, tmp_path: Path) -> None:
+        """Hook must reject symlinked map paths at initialization to prevent file tampering."""
+        sensitive_target = tmp_path / "sensitive_file.txt"
+        sensitive_target.write_text("CONFIDENTIAL_SYSTEM_DATA")
+
+        malicious_symlink = tmp_path / "fake_map.symlink"
+        malicious_symlink.symlink_to(sensitive_target)
+
+        with pytest.raises(MorayQuarantineError, match="Symlink map path rejected"):
+            MorayHook(map_path=str(malicious_symlink), mock_mode=True)
+
+        # Confirm sensitive target was never overwritten
+        assert sensitive_target.read_text() == "CONFIDENTIAL_SYSTEM_DATA"
+
+    def test_symlink_substitution_rejected_during_strike(self, tmp_path: Path) -> None:
+        """Hook must reject symlink if substituted before strike."""
+        map_path = tmp_path / "normal_map.map"
+        hook = MorayHook(map_path=str(map_path), mock_mode=True)
+
+        # Adversary removes map file and substitutes a symlink
+        sensitive_target = tmp_path / "sensitive_target.txt"
+        sensitive_target.write_text("ORIGINAL_DATA")
+
+        if map_path.exists():
+            map_path.unlink()
+        map_path.symlink_to(sensitive_target)
+
+        with pytest.raises(MorayQuarantineError, match="Symlink map path rejected"):
+            hook.strike(4444)
+
+        assert sensitive_target.read_text() == "ORIGINAL_DATA"

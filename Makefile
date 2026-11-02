@@ -24,9 +24,17 @@ DAEMON_BIN = $(BIN_DIR)/morayd
 TEST_STRUCT_SRC = $(TESTS_DIR)/test_struct_layout.c
 TEST_STRUCT_BIN = $(BUILD_DIR)/test_struct_layout
 
-.PHONY: all clean test bpf daemon dirs
+.PHONY: all clean test bpf daemon dirs build verify
 
 all: dirs bpf daemon test
+
+build: dirs bpf daemon
+
+verify: clean all
+	@echo "[*] Running comprehensive verification pipeline..."
+	@ruff check .
+	@ruff format --check .
+	@echo "[+] ALL SYSTEMS VERIFIED: Build, layout, invariants, and linters passed cleanly."
 
 dirs:
 	@mkdir -p $(BUILD_DIR) $(BIN_DIR)

@@ -17,7 +17,12 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/vfs.h>
 #include "moray.h"
+
+#ifndef BPF_FS_MAGIC
+#define BPF_FS_MAGIC 0xcafe4a11
+#endif
 
 #ifndef __NR_bpf
 #if defined(__x86_64__)
@@ -43,6 +48,49 @@ static void print_banner(void) {
     fprintf(stdout, "  PROJECT MORAY: Ring 0 OS-Level Containment Daemon     \n");
     fprintf(stdout, "  Subsystem: BPF-LSM / XDP Pharyngeal Strike Controller \n");
     fprintf(stdout, "========================================================\n");
+}
+
+/*
+ * Mandatory Kernel Preflight Checks (Phase 2 Contract)
+ * Verifies privilege, active BPF-LSM, and /sys/fs/bpf mounting.
+ */
+static int run_kernel_preflight_checks(void) {
+    fprintf(stdout, "[*] Running Ring 0 Kernel Preflight Checks...\n");
+
+    /* 1. Privilege Check */
+    if (geteuid() != 0) {
+        fprintf(stderr, "[-] FATAL (PREFLIGHT_PRIVILEGE_INSUFFICIENT): morayd requires CAP_SYS_ADMIN / CAP_BPF (euid 0).\n");
+        return -1;
+    }
+
+    /* 2. Active BPF-LSM Check */
+    int lsm_fd = open("/sys/kernel/security/lsm", O_RDONLY);
+    if (lsm_fd < 0) {
+        fprintf(stderr, "[-] FATAL (PREFLIGHT_LSM_NOT_ACTIVE): Cannot access /sys/kernel/security/lsm: %s\n", strerror(errno));
+        fprintf(stderr, "[-] Verify CONFIG_SECURITY and securityfs are mounted.\n");
+        return -1;
+    }
+
+    char lsm_buf[256] = {0};
+    ssize_t bytes_read = read(lsm_fd, lsm_buf, sizeof(lsm_buf) - 1);
+    close(lsm_fd);
+
+    if (bytes_read <= 0 || strstr(lsm_buf, "bpf") == NULL) {
+        fprintf(stderr, "[-] FATAL (PREFLIGHT_LSM_NOT_ACTIVE): 'bpf' is not active in /sys/kernel/security/lsm (active: '%s').\n", lsm_buf);
+        fprintf(stderr, "[-] Host kernel must have CONFIG_BPF_LSM=y and boot with 'lsm=...,bpf'.\n");
+        return -1;
+    }
+
+    /* 3. BPF Filesystem Mount Check */
+    struct statfs fs;
+    if (statfs("/sys/fs/bpf", &fs) != 0 || (unsigned long)fs.f_type != (unsigned long)BPF_FS_MAGIC) {
+        fprintf(stderr, "[-] FATAL (PREFLIGHT_BPFFS_NOT_MOUNTED): /sys/fs/bpf is not mounted as a bpf filesystem.\n");
+        fprintf(stderr, "[-] Run: mount -t bpf bpf /sys/fs/bpf\n");
+        return -1;
+    }
+
+    fprintf(stdout, "[+] PREFLIGHT PASSED: Root privilege confirmed, BPF-LSM active in kernel, /sys/fs/bpf verified.\n");
+    return 0;
 }
 
 /* Ensure directory exists */
@@ -94,9 +142,13 @@ int main(int argc, char **argv) {
             fprintf(stdout, "Usage: %s [options]\n", argv[0]);
             fprintf(stdout, "Options:\n");
             fprintf(stdout, "  --mock [dir]   Run in mock mode using filesystem backing (for unprivileged testing)\n");
+            fprintf(stdout, "  --preflight    Execute live kernel preflight checks and exit\n");
             fprintf(stdout, "  --pin-dir <dir> Override default BPF pin directory (default: %s)\n", MORAY_PIN_DIR);
             fprintf(stdout, "  --help         Show this help message\n");
             return 0;
+        } else if (strcmp(argv[i], "--preflight") == 0) {
+            print_banner();
+            return (run_kernel_preflight_checks() == 0) ? 0 : 1;
         } else if (strcmp(argv[i], "--mock") == 0) {
             mock_mode = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') {
@@ -142,9 +194,9 @@ int main(int argc, char **argv) {
             return 1;
         }
     } else {
-        /* Real kernel mode: check if root */
-        if (geteuid() != 0) {
-            fprintf(stderr, "[-] Error: morayd requires root privileges (CAP_SYS_ADMIN / CAP_BPF) for live Ring 0 operation.\n");
+        /* Real kernel mode: run strict preflight checks */
+        if (run_kernel_preflight_checks() != 0) {
+            fprintf(stderr, "[-] Preflight validation failed. morayd cannot enforce Ring 0 containment on this host.\n");
             fprintf(stderr, "[-] Use '--mock <path>' to run in simulation/testing mode.\n");
             return 1;
         }
