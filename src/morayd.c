@@ -132,6 +132,10 @@ static int init_mock_quarantine(const char *path) {
 }
 
 int main(int argc, char **argv) {
+    /* Line-buffered stdout and unbuffered stderr for real-time logging */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
     bool mock_mode = false;
     const char *pin_dir = MORAY_PIN_DIR;
     char quarantine_path[256];
@@ -169,6 +173,7 @@ int main(int argc, char **argv) {
     sa.sa_handler = sig_handler;
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
+    signal(SIGHUP, SIG_IGN);
 
     fprintf(stdout, "[*] Target pin directory: %s\n", pin_dir);
 

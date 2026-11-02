@@ -34,6 +34,13 @@ MORAY_REASON_EXEC_VIOLATION: int = 2
 MORAY_REASON_SOCKET_VIOLATION: int = 3
 MORAY_REASON_TAMPER_ATTEMPT: int = 4
 
+# Hook Point Identifiers matching src/moray.h
+MORAY_HOOK_NONE: int = 0
+MORAY_HOOK_BPRM: int = 1
+MORAY_HOOK_SOCKET: int = 2
+MORAY_HOOK_BPF_TAMPER: int = 3
+MORAY_HOOK_XDP: int = 4
+
 # Policy State Codes matching src/moray.h
 MORAY_STATE_ACTIVE: int = 1
 MORAY_STATE_EXPIRED: int = 2
@@ -197,6 +204,18 @@ class MorayHook:
                 return self._bpf_update_elem(pid, entry)
         except OSError as exc:
             raise MorayQuarantineError(f"Strike failed for PID {pid}: {exc}") from exc
+
+    def report_tamper(self, pid: int, auto_escalate: bool = True) -> bool:
+        """
+        Assert immediate high-severity quarantine against a PID attempting containment tampering.
+        Enforces Invariant I_7 (Anti-Tampering & Containment Self-Defense).
+        """
+        flags = (
+            MORAY_ACT_FULL_STRIKE
+            if auto_escalate
+            else (MORAY_ACT_BLOCK_EXEC | MORAY_ACT_BLOCK_SOCKET | MORAY_ACT_DROP_NET)
+        )
+        return self.strike(pid, action_flags=flags, reason=MORAY_REASON_TAMPER_ATTEMPT)
 
     def release(self, pid: int) -> bool:
         """
@@ -496,6 +515,11 @@ def main() -> None:
     )
     parser.add_argument("--pid", type=int, help="Target process ID (PID) to inspect or strike")
     parser.add_argument("--strike", action="store_true", help="Trigger Pharyngeal Strike on PID")
+    parser.add_argument(
+        "--report-tamper",
+        action="store_true",
+        help="Assert immediate anti-tamper quarantine on target PID (reason=TAMPER_ATTEMPT)",
+    )
     parser.add_argument("--release", action="store_true", help="Remove PID from quarantine")
     parser.add_argument(
         "--check", action="store_true", help="Check if PID is currently quarantined"
@@ -555,6 +579,24 @@ def main() -> None:
                 ttl_msg = f" (TTL: {args.ttl}s)" if args.ttl > 0 else " (Permanent)"
                 print(
                     f"[+] MORAY STRIKE ASSERTED: PID {args.pid} entered in-kernel quarantine{ttl_msg}."
+                )
+        elif args.report_tamper:
+            if not args.pid:
+                parser.error("--report-tamper requires --pid <PID>")
+            hook.report_tamper(args.pid)
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "status": "asserted_tamper",
+                            "pid": args.pid,
+                            "reason": MORAY_REASON_TAMPER_ATTEMPT,
+                        }
+                    )
+                )
+            else:
+                print(
+                    f"[!] MORAY ANTI-TAMPER ASSERTED: PID {args.pid} entered in-kernel quarantine (Tamper Attempt)."
                 )
         elif args.release:
             if not args.pid:
