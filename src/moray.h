@@ -57,6 +57,16 @@ typedef int64_t  __s64;
 #define MORAY_HOOK_BPF_TAMPER   3U
 #define MORAY_HOOK_XDP          4U
 
+/* Policy State Codes */
+#define MORAY_STATE_ACTIVE      1U  /* Actively enforced */
+#define MORAY_STATE_EXPIRED     2U  /* TTL expired, pending eviction */
+#define MORAY_STATE_RELEASED    3U  /* Cleared from containment */
+
+/* Strike Escalation Tiers */
+#define MORAY_STRIKE_TIER1      1U  /* 1 hit: Block execve */
+#define MORAY_STRIKE_TIER2      3U  /* 3 hits: Block execve + network sockets */
+#define MORAY_STRIKE_TIER3      5U  /* 5 hits: Auto-escalate to SIGKILL */
+
 /*
  * Quarantine Map Entry Value
  * Key: __u32 (Process ID / TGID)
@@ -65,9 +75,9 @@ typedef int64_t  __s64;
 struct moray_quarantine_entry {
     __u32 action_flags;  /* Bitmask of MORAY_ACT_* */
     __u32 reason;        /* Source code / trigger reason */
-    __u64 timestamp_ns;  /* Epoch timestamp or ktime in nanoseconds */
+    __u64 timestamp_ns;  /* Epoch timestamp in nanoseconds */
     __u32 strike_count;  /* Interception hit counter maintained by BPF */
-    __u32 reserved;      /* Explicit 8-byte alignment padding */
+    __u32 ttl_seconds;   /* Time-to-live in seconds (0 = permanent, >0 = auto-expiry) */
 };
 
 /*

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0 OR BSD-2-Clause
 """
-Project Moray: Zero-Dependency Python Bridge for Project Lobster
-Provides fail-closed quarantine triggering into Ring 0 eBPF maps.
+Project Moray: Zero-Dependency Python Bridge & Policy Engine for Project Lobster
+Provides fail-closed quarantine triggering, TTL expiration, and policy lifecycle controls.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import fcntl
+import json
 import os
 import struct
 import sys
@@ -32,6 +33,16 @@ MORAY_REASON_LOBSTER_L7: int = 1
 MORAY_REASON_EXEC_VIOLATION: int = 2
 MORAY_REASON_SOCKET_VIOLATION: int = 3
 MORAY_REASON_TAMPER_ATTEMPT: int = 4
+
+# Policy State Codes matching src/moray.h
+MORAY_STATE_ACTIVE: int = 1
+MORAY_STATE_EXPIRED: int = 2
+MORAY_STATE_RELEASED: int = 3
+
+# Strike Escalation Tiers
+MORAY_STRIKE_TIER1: int = 1  # 1 hit: Block execve
+MORAY_STRIKE_TIER2: int = 3  # 3 hits: Block execve + network sockets
+MORAY_STRIKE_TIER3: int = 5  # 5 hits: Auto-escalate to SIGKILL
 
 # Default Pinned Paths
 DEFAULT_PIN_DIR: str = "/sys/fs/bpf/moray"
@@ -61,7 +72,7 @@ class MorayQuarantineEntry(ctypes.Structure):
         ("reason", ctypes.c_uint32),
         ("timestamp_ns", ctypes.c_uint64),
         ("strike_count", ctypes.c_uint32),
-        ("reserved", ctypes.c_uint32),
+        ("ttl_seconds", ctypes.c_uint32),
     ]
 
 
@@ -105,6 +116,15 @@ def validate_pid(pid: int) -> None:
         raise MorayQuarantineError(f"PID out of permissible range ({PID_MIN}-{PID_MAX}): {pid}")
 
 
+def is_entry_expired(entry: MorayQuarantineEntry, now_ns: int | None = None) -> bool:
+    """Check if an entry's TTL has lapsed."""
+    if entry.ttl_seconds == 0:
+        return False
+    if now_ns is None:
+        now_ns = int(time.time() * 1_000_000_000)
+    return now_ns > (entry.timestamp_ns + entry.ttl_seconds * 1_000_000_000)
+
+
 class MorayHook:
     """
     Controls containment quarantine entries via pinned BPF maps or mock test backings.
@@ -146,18 +166,22 @@ class MorayHook:
         pid: int,
         action_flags: int = MORAY_ACT_FULL_STRIKE,
         reason: int = MORAY_REASON_LOBSTER_L7,
+        ttl_seconds: int = 0,
     ) -> bool:
         """
         Register a process PID in the quarantine map to trigger an in-kernel strike.
+        ttl_seconds: 0 for permanent quarantine, >0 for auto-expiring containment.
         """
         validate_pid(pid)
+        if not isinstance(ttl_seconds, int) or isinstance(ttl_seconds, bool) or ttl_seconds < 0:
+            raise MorayQuarantineError(f"TTL must be a non-negative integer, got {ttl_seconds}")
 
         entry = MorayQuarantineEntry()
         entry.action_flags = action_flags
         entry.reason = reason
         entry.timestamp_ns = int(time.time() * 1_000_000_000)
         entry.strike_count = 0
-        entry.reserved = 0
+        entry.ttl_seconds = ttl_seconds
 
         try:
             if self.mock_mode:
@@ -200,19 +224,16 @@ class MorayHook:
     def is_quarantined(self, pid: int) -> bool:
         """
         Check if a PID currently has an active quarantine strike.
+        Returns False if the PID is benign or its TTL has expired (Invariant I_2).
         """
         if not isinstance(pid, int) or isinstance(pid, bool) or pid < PID_MIN or pid > PID_MAX:
             return False
 
-        if self.mock_mode:
+        entry = self.get_entry(pid)
+        if entry is None:
+            return False
 
-            def _do_check() -> bool:
-                self._load_mock_file()
-                return pid in self._mock_table
-
-            return self._with_lock(_do_check)
-
-        return self._bpf_lookup_elem(pid) is not None
+        return not is_entry_expired(entry)
 
     def get_entry(self, pid: int) -> MorayQuarantineEntry | None:
         """
@@ -231,15 +252,82 @@ class MorayHook:
 
         return self._bpf_lookup_elem(pid)
 
-    def list_quarantined(self) -> list[tuple[int, MorayQuarantineEntry]]:
+    def get_status(self, pid: int) -> dict[str, object]:
         """
-        List all active quarantine entries.
+        Retrieve structured, auditable policy status for a PID.
+        """
+        validate_pid(pid)
+        entry = self.get_entry(pid)
+        if entry is None:
+            return {
+                "pid": pid,
+                "state": "NONE",
+                "quarantined": False,
+                "action_flags": 0,
+                "reason": 0,
+                "strike_count": 0,
+                "ttl_seconds": 0,
+                "remaining_seconds": 0,
+            }
+
+        now_ns = int(time.time() * 1_000_000_000)
+        expired = is_entry_expired(entry, now_ns)
+        remaining = 0
+        if entry.ttl_seconds > 0 and not expired:
+            elapsed_sec = (now_ns - entry.timestamp_ns) / 1_000_000_000
+            remaining = max(0, int(entry.ttl_seconds - elapsed_sec))
+
+        return {
+            "pid": pid,
+            "state": "EXPIRED" if expired else "ACTIVE",
+            "quarantined": not expired,
+            "action_flags": entry.action_flags,
+            "reason": entry.reason,
+            "strike_count": entry.strike_count,
+            "ttl_seconds": entry.ttl_seconds,
+            "remaining_seconds": remaining,
+            "timestamp_ns": entry.timestamp_ns,
+        }
+
+    def evict_expired(self) -> list[int]:
+        """
+        Evict all entries whose TTL has elapsed. Returns list of evicted PIDs.
+        """
+        if not self.mock_mode:
+            return []
+
+        def _do_evict() -> list[int]:
+            self._load_mock_file()
+            now_ns = int(time.time() * 1_000_000_000)
+            expired_pids = [
+                pid for pid, entry in self._mock_table.items() if is_entry_expired(entry, now_ns)
+            ]
+            for pid in expired_pids:
+                del self._mock_table[pid]
+            if expired_pids:
+                self._sync_mock_file()
+            return expired_pids
+
+        return self._with_lock(_do_evict)
+
+    def list_quarantined(
+        self, include_expired: bool = False
+    ) -> list[tuple[int, MorayQuarantineEntry]]:
+        """
+        List active quarantine entries. Expired TTL entries are excluded unless include_expired=True.
         """
         if self.mock_mode:
 
             def _do_list() -> list[tuple[int, MorayQuarantineEntry]]:
                 self._load_mock_file()
-                return list(self._mock_table.items())
+                now_ns = int(time.time() * 1_000_000_000)
+                if include_expired:
+                    return list(self._mock_table.items())
+                return [
+                    (pid, entry)
+                    for pid, entry in self._mock_table.items()
+                    if not is_entry_expired(entry, now_ns)
+                ]
 
             return self._with_lock(_do_list)
         return []
@@ -323,7 +411,7 @@ class MorayHook:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Project Moray: Zero-Dependency Python Bridge for Project Lobster",
+        description="Project Moray: Zero-Dependency Python Bridge & Policy Engine for Project Lobster",
     )
     parser.add_argument("--pid", type=int, help="Target process ID (PID) to inspect or strike")
     parser.add_argument("--strike", action="store_true", help="Trigger Pharyngeal Strike on PID")
@@ -331,7 +419,19 @@ def main() -> None:
     parser.add_argument(
         "--check", action="store_true", help="Check if PID is currently quarantined"
     )
+    parser.add_argument(
+        "--status", action="store_true", help="Query structured policy status for PID"
+    )
     parser.add_argument("--list", action="store_true", help="List all quarantined PIDs")
+    parser.add_argument(
+        "--evict-expired", action="store_true", help="Purge all expired TTL quarantine entries"
+    )
+    parser.add_argument(
+        "--ttl",
+        type=int,
+        default=0,
+        help="Time-to-live in seconds (0 = permanent, >0 = auto-expiry)",
+    )
     parser.add_argument(
         "--action", type=int, default=MORAY_ACT_FULL_STRIKE, help="Quarantine action mask"
     )
@@ -342,6 +442,7 @@ def main() -> None:
         "--map-path", type=str, default=DEFAULT_QUARANTINE_PIN, help="Path to quarantine map"
     )
     parser.add_argument("--mock", action="store_true", help="Force mock testing mode")
+    parser.add_argument("--json", action="store_true", help="Format output as structured JSON")
 
     args = parser.parse_args()
 
@@ -351,37 +452,95 @@ def main() -> None:
         if args.strike:
             if not args.pid:
                 parser.error("--strike requires --pid <PID>")
-            hook.strike(args.pid, action_flags=args.action, reason=args.reason)
-            print(f"[+] MORAY STRIKE ASSERTED: PID {args.pid} entered in-kernel quarantine.")
+            hook.strike(
+                args.pid, action_flags=args.action, reason=args.reason, ttl_seconds=args.ttl
+            )
+            if args.json:
+                print(json.dumps({"status": "asserted", "pid": args.pid, "ttl_seconds": args.ttl}))
+            else:
+                ttl_msg = f" (TTL: {args.ttl}s)" if args.ttl > 0 else " (Permanent)"
+                print(
+                    f"[+] MORAY STRIKE ASSERTED: PID {args.pid} entered in-kernel quarantine{ttl_msg}."
+                )
         elif args.release:
             if not args.pid:
                 parser.error("--release requires --pid <PID>")
-            if hook.release(args.pid):
-                print(f"[+] MORAY RELEASE: PID {args.pid} cleared from quarantine.")
+            released = hook.release(args.pid)
+            if args.json:
+                print(
+                    json.dumps({"status": "released" if released else "not_found", "pid": args.pid})
+                )
             else:
-                print(f"[-] PID {args.pid} was not found in quarantine.")
+                if released:
+                    print(f"[+] MORAY RELEASE: PID {args.pid} cleared from quarantine.")
+                else:
+                    print(f"[-] PID {args.pid} was not found in quarantine.")
+        elif args.status:
+            if not args.pid:
+                parser.error("--status requires --pid <PID>")
+            status_data = hook.get_status(args.pid)
+            if args.json:
+                print(json.dumps(status_data, indent=2))
+            else:
+                print(f"[*] PID {args.pid} Policy Status:")
+                print(f"  State:             {status_data['state']}")
+                print(f"  Quarantined:       {status_data['quarantined']}")
+                print(f"  Action Flags:      {status_data['action_flags']:#04x}")
+                print(f"  Reason Code:       {status_data['reason']}")
+                print(f"  Strike Hits:       {status_data['strike_count']}")
+                print(f"  TTL Total:         {status_data['ttl_seconds']}s")
+                print(f"  TTL Remaining:     {status_data['remaining_seconds']}s")
         elif args.check:
             if not args.pid:
                 parser.error("--check requires --pid <PID>")
-            if hook.is_quarantined(args.pid):
-                entry = hook.get_entry(args.pid)
-                flags = entry.action_flags if entry else 0
-                reason = entry.reason if entry else 0
-                print(
-                    f"[!] PID {args.pid} is QUARANTINED (action_flags={flags:#x}, reason={reason})."
-                )
-                sys.exit(1)
+            is_q = hook.is_quarantined(args.pid)
+            if args.json:
+                print(json.dumps({"pid": args.pid, "quarantined": is_q}))
+                sys.exit(1 if is_q else 0)
             else:
-                print(f"[+] PID {args.pid} is BENIGN (not quarantined).")
-                sys.exit(0)
+                if is_q:
+                    entry = hook.get_entry(args.pid)
+                    flags = entry.action_flags if entry else 0
+                    reason = entry.reason if entry else 0
+                    print(
+                        f"[!] PID {args.pid} is QUARANTINED (action_flags={flags:#x}, reason={reason})."
+                    )
+                    sys.exit(1)
+                else:
+                    print(f"[+] PID {args.pid} is BENIGN (not quarantined).")
+                    sys.exit(0)
+        elif args.evict_expired:
+            evicted = hook.evict_expired()
+            if args.json:
+                print(
+                    json.dumps(
+                        {"status": "evicted", "evicted_pids": evicted, "count": len(evicted)}
+                    )
+                )
+            else:
+                print(f"[+] EVICTED {len(evicted)} expired quarantine entries: {evicted}")
         elif args.list:
             entries = hook.list_quarantined()
-            print(f"[*] Total Quarantined Entities: {len(entries)}")
-            for pid, entry in entries:
-                print(
-                    f"  PID {pid:6d} | Flags: {entry.action_flags:#04x} | "
-                    f"Reason: {entry.reason} | Hits: {entry.strike_count}"
-                )
+            if args.json:
+                output = [
+                    {
+                        "pid": pid,
+                        "action_flags": entry.action_flags,
+                        "reason": entry.reason,
+                        "strike_count": entry.strike_count,
+                        "ttl_seconds": entry.ttl_seconds,
+                    }
+                    for pid, entry in entries
+                ]
+                print(json.dumps(output, indent=2))
+            else:
+                print(f"[*] Total Active Quarantined Entities: {len(entries)}")
+                for pid, entry in entries:
+                    ttl_str = f"{entry.ttl_seconds}s" if entry.ttl_seconds > 0 else "inf"
+                    print(
+                        f"  PID {pid:6d} | Flags: {entry.action_flags:#04x} | "
+                        f"Reason: {entry.reason} | Hits: {entry.strike_count} | TTL: {ttl_str}"
+                    )
         else:
             parser.print_help()
 

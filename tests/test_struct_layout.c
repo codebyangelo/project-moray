@@ -14,7 +14,7 @@ int main(void) {
     assert(offsetof(struct moray_quarantine_entry, reason) == 4);
     assert(offsetof(struct moray_quarantine_entry, timestamp_ns) == 8);
     assert(offsetof(struct moray_quarantine_entry, strike_count) == 16);
-    assert(offsetof(struct moray_quarantine_entry, reserved) == 20);
+    assert(offsetof(struct moray_quarantine_entry, ttl_seconds) == 20);
 
     /* Verify moray_event */
     printf("[-] sizeof(struct moray_event) = %zu\n", sizeof(struct moray_event));

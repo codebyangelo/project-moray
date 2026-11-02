@@ -85,11 +85,12 @@ int moray_bprm_strike(struct linux_binprm *bprm)
     }
 
     if (entry && (entry->action_flags & MORAY_ACT_BLOCK_EXEC)) {
-        __sync_fetch_and_add(&entry->strike_count, 1);
-        bpf_printk("MORAY STRIKE: Intercepted execve from PID %d (strikes: %d)\n", tgid, entry->strike_count);
-        emit_strike_event(pid, tgid, entry->action_flags, -1, MORAY_HOOK_BPRM, entry->strike_count);
+        __u32 hits = __sync_fetch_and_add(&entry->strike_count, 1) + 1;
+        bpf_printk("MORAY STRIKE: Intercepted execve from PID %d (hits: %d)\n", tgid, hits);
+        emit_strike_event(pid, tgid, entry->action_flags, -1, MORAY_HOOK_BPRM, hits);
 
-        if (entry->action_flags & MORAY_ACT_KILL) {
+        /* Dynamic Escalation: Auto-terminate target if hits reach Tier 3 threshold (5 hits) */
+        if ((entry->action_flags & MORAY_ACT_KILL) || hits >= MORAY_STRIKE_TIER3) {
             bpf_send_signal(9); /* SIGKILL */
         }
         return -1; /* -EPERM */
