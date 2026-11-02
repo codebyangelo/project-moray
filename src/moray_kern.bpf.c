@@ -72,7 +72,7 @@ static __attribute__((always_inline)) void emit_strike_event(
  * Invariant I_2: Non-quarantined PID returns 0 in O(1) time.
  */
 SEC("lsm/bprm_check_security")
-int moray_bprm_strike(struct linux_binprm *bprm)
+int BPF_PROG(moray_bprm_strike, struct linux_binprm *bprm)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 tgid = (__u32)(pid_tgid >> 32);
@@ -105,7 +105,7 @@ int moray_bprm_strike(struct linux_binprm *bprm)
  * Invariant I_4: Granular Network Egress Filtering allows loopback/IPC if MORAY_ACT_ALLOW_LOOPBACK is set.
  */
 SEC("lsm/socket_connect")
-int moray_socket_strike(struct socket *sock, struct sockaddr *address, int addrlen)
+int BPF_PROG(moray_socket_strike, struct socket *sock, struct sockaddr *address, int addrlen)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 tgid = (__u32)(pid_tgid >> 32);
@@ -169,7 +169,7 @@ int moray_socket_strike(struct socket *sock, struct sockaddr *address, int addrl
  * Invariant I_3 / I_7: Quarantined processes cannot interact with bpf() syscall.
  */
 SEC("lsm/bpf")
-int moray_bpf_strike(int cmd, union bpf_attr *attr, unsigned int size)
+int BPF_PROG(moray_bpf_strike, int cmd, union bpf_attr *attr, unsigned int size)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 tgid = (__u32)(pid_tgid >> 32);

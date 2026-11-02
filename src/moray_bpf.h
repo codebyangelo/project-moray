@@ -11,6 +11,47 @@
 
 #define SEC(name) __attribute__((section(name), used))
 
+/*
+ * BPF_PROG Macro Definition for LSM & Tracing Programs
+ * Emits canonical (unsigned long long *ctx) entry points that safely unpack
+ * context arguments via memory offsets rather than uninitialized registers.
+ */
+#ifndef ___bpf_concat
+#define ___bpf_concat(a, b) a ## b
+#endif
+#ifndef ___bpf_apply
+#define ___bpf_apply(fn, n) ___bpf_concat(fn, n)
+#endif
+#ifndef ___bpf_nth
+#define ___bpf_nth(_, _1, _2, _3, _4, _5, _6, N, ...) N
+#endif
+#ifndef ___bpf_narg
+#define ___bpf_narg(...) ___bpf_nth(_, ##__VA_ARGS__, 6, 5, 4, 3, 2, 1, 0)
+#endif
+
+#define ___bpf_ctx_cast0()            ctx
+#define ___bpf_ctx_cast1(x)           ___bpf_ctx_cast0(), (void *)ctx[0]
+#define ___bpf_ctx_cast2(x, args...)  ___bpf_ctx_cast1(args), (void *)ctx[1]
+#define ___bpf_ctx_cast3(x, args...)  ___bpf_ctx_cast2(args), (void *)ctx[2]
+#define ___bpf_ctx_cast4(x, args...)  ___bpf_ctx_cast3(args), (void *)ctx[3]
+#define ___bpf_ctx_cast5(x, args...)  ___bpf_ctx_cast4(args), (void *)ctx[4]
+#define ___bpf_ctx_cast6(x, args...)  ___bpf_ctx_cast5(args), (void *)ctx[5]
+#define ___bpf_ctx_cast(args...)      ___bpf_apply(___bpf_ctx_cast, ___bpf_narg(args))(args)
+
+#define BPF_PROG(name, args...) \
+name(unsigned long long *ctx); \
+static inline __attribute__((always_inline)) typeof(name(0)) \
+____##name(unsigned long long *ctx, ##args); \
+typeof(name(0)) name(unsigned long long *ctx) \
+{ \
+    _Pragma("clang diagnostic push") \
+    _Pragma("clang diagnostic ignored \"-Wint-conversion\"") \
+    return ____##name(___bpf_ctx_cast(args)); \
+    _Pragma("clang diagnostic pop") \
+} \
+static inline __attribute__((always_inline)) typeof(name(0)) \
+____##name(unsigned long long *ctx, ##args)
+
 /* BTF map definition macros */
 #define __uint(name, val) int (*name)[val]
 #define __type(name, val) typeof(val) *name
