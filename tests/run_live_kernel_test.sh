@@ -139,8 +139,20 @@ if [ "$RET_KILL" -ne 137 ]; then
 fi
 echo "[+] EMPIRICAL PROOF: Ring 0 BPF-LSM auto-terminated quarantined target with SIGKILL (exit code 137)!"
 
-# 9. Clean Teardown
-echo "[*] Step 9: Terminating morayd..."
+# 9. Verify Real Ring 0 Telemetry Ingestion from Ringbuf (/sys/fs/bpf/moray/events)
+echo "[*] Step 9: Verifying live Ring 0 telemetry extraction from /sys/fs/bpf/moray/events..."
+EVENTS_OUT=$(python3 bridge/lobster_hook.py --events-path /sys/fs/bpf/moray/events --tail-events --count 5 --json)
+echo "[+] Live In-Kernel Telemetry Events:"
+echo "$EVENTS_OUT"
+
+if ! echo "$EVENTS_OUT" | grep -q "BPRM_CHECK_SECURITY"; then
+    echo "[-] FATAL: Live BPRM event was not retrieved from ringbuf!"
+    exit 1
+fi
+echo "[+] EMPIRICAL PROOF: In-kernel BPF ringbuf event was consumed and validated by userspace bridge!"
+
+# 10. Clean Teardown
+echo "[*] Step 10: Terminating morayd..."
 kill -TERM "$DAEMON_PID"
 sleep 1
 
