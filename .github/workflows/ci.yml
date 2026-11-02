@@ -50,7 +50,7 @@ jobs:
         sudo apt-get install -y clang llvm gcc make libbpf-dev gcc-multilib linux-libc-dev qemu-system-x86
         sudo pip install --break-system-packages virtme-ng
 
-    - name: Verify KVM Virtualization Acceleration
+    - name: Verify KVM Virtualization Acceleration & Kernel Permissions
       run: |
         if [ -e /dev/kvm ]; then
           echo "[+] KVM acceleration available on runner"
@@ -58,6 +58,7 @@ jobs:
         else
           echo "[!] Warning: /dev/kvm not found; virtme-ng will use emulation"
         fi
+        sudo chmod +r /boot/vmlinuz-* || true
 
     - name: Build BPF Bytecode & Loader Daemon
       run: |
@@ -65,8 +66,9 @@ jobs:
 
     - name: Execute Live Ring 0 Test Suite in MicroVM
       run: |
-        vng --kimg /boot/vmlinuz-$(uname -r) \
+        vng -v \
+            -r "/boot/vmlinuz-$(uname -r)" \
             --append "lsm=landlock,lockdown,yama,bpf" \
             --user root \
             --cwd "$PWD" \
-            --run "./tests/run_live_kernel_test.sh"
+            --exec "$PWD/tests/run_live_kernel_test.sh"
