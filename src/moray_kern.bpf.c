@@ -128,7 +128,7 @@ int moray_socket_strike(struct socket *sock, struct sockaddr *address, int addrl
 
 /*
  * Camouflage Strike 3: Anti-Tamper Protection (The Crevice)
- * Invariant I_3: Quarantined processes cannot interact with bpf() syscall.
+ * Invariant I_3 / I_7: Quarantined processes cannot interact with bpf() syscall.
  */
 SEC("lsm/bpf")
 int moray_bpf_strike(int cmd, union bpf_attr *attr, unsigned int size)
@@ -143,8 +143,14 @@ int moray_bpf_strike(int cmd, union bpf_attr *attr, unsigned int size)
     }
 
     if (entry) {
-        bpf_printk("MORAY ANTI-TAMPER: Blocked bpf() syscall from PID %d\n", tgid);
-        emit_strike_event(pid, tgid, entry->action_flags, -1, MORAY_HOOK_BPF_TAMPER, entry->strike_count);
+        __u32 hits = __sync_fetch_and_add(&entry->strike_count, 1) + 1;
+        bpf_printk("MORAY ANTI-TAMPER: Blocked bpf() syscall from PID %d (hits: %d)\n", tgid, hits);
+        emit_strike_event(pid, tgid, entry->action_flags, -1, MORAY_HOOK_BPF_TAMPER, hits);
+
+        /* Dynamic Escalation: Auto-terminate target if hits reach Tier 3 or kill flag is asserted */
+        if ((entry->action_flags & MORAY_ACT_KILL) || hits >= MORAY_STRIKE_TIER3) {
+            bpf_send_signal(9); /* SIGKILL */
+        }
         return -1; /* -EPERM */
     }
 
