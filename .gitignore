@@ -1,0 +1,13 @@
+# Build outputs and binaries
+bin/
+build/
+*.o
+*.bpf.o
+tests/test_struct_layout
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
