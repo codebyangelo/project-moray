@@ -5,6 +5,7 @@ CC ?= gcc
 CLANG ?= clang
 CFLAGS ?= -Wall -Wextra -Werror -O2 -std=c11
 BPF_CFLAGS ?= -target bpf -O2 -g -Wall -Werror -Isrc
+LDLIBS ?= -lbpf -lelf -lz
 
 ARCH ?= $(shell uname -m)
 MULTIARCH_INC ?= /usr/include/$(ARCH)-linux-gnu
@@ -49,7 +50,7 @@ daemon: dirs $(DAEMON_BIN)
 
 $(DAEMON_BIN): $(DAEMON_SRC) $(SRC_DIR)/moray.h
 	@echo "[*] Compiling morayd loader daemon: $< -> $@"
-	$(CC) $(CFLAGS) -I$(SRC_DIR) $< -o $@
+	$(CC) $(CFLAGS) -I$(SRC_DIR) $< $(LDLIBS) -o $@
 
 test: dirs $(TEST_STRUCT_BIN)
 	@echo "[*] Executing struct alignment & layout tests..."
