@@ -51,6 +51,32 @@ Before deploying `morayd`, verify that the host kernel satisfies the requirement
 - **Boot Parameter**: Host `/proc/cmdline` must include `lsm=...,bpf`.
 - **Privilege Requirements**: `CAP_BPF` + `CAP_SYS_ADMIN` (or `root` / `euid 0`).
 
+### Host Arming & Bootloader Configuration (Pre-Deployment)
+On standard distribution kernels, `bpf` is not active in the LSM order by default. The host must be armed and rebooted before launching `morayd`:
+
+1. **Check & Append Active LSMs**:
+   ```bash
+   CURRENT_LSM=$(cat /sys/kernel/security/lsm 2>/dev/null || echo "lockdown,capability,landlock,yama,apparmor")
+   # Ubuntu / Debian:
+   sudo sed -i 's/^GRUB_CMDLINE_LINUX="/GRUB_CMDLINE_LINUX="lsm='"${CURRENT_LSM}"',bpf /' /etc/default/grub
+   sudo update-grub
+
+   # Fedora / RHEL / Rocky / Amazon Linux 2023:
+   sudo grubby --update-kernel=ALL --args="lsm=${CURRENT_LSM},bpf"
+   ```
+
+2. **Mount BPF Filesystem Permanently**:
+   ```bash
+   echo "bpffs /sys/fs/bpf bpf rw,nosuid,nodev,noexec,relatime,mode=700 0 0" | sudo tee -a /etc/fstab
+   sudo mount -a
+   ```
+
+3. **Reboot Host**:
+   ```bash
+   sudo reboot
+   ```
+   *(For detailed distribution matrices, see [`COMPATIBILITY.md`](file:///root/home/projects/project-moray/docs/COMPATIBILITY.md#3-arming-bpf-lsm-across-linux-distributions))*.
+
 ### Installation via Systemd
 
 1. **Install Binaries**:
