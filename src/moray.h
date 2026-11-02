@@ -7,7 +7,7 @@
 #ifndef _MORAY_H_
 #define _MORAY_H_
 
-#ifdef __KERNEL__
+#if defined(__linux__) || defined(__KERNEL__)
 #include <linux/types.h>
 #else
 #include <stdint.h>
