@@ -160,6 +160,7 @@ class TestStructuredStatusAPI:
             "state": "NONE",
             "quarantined": False,
             "action_flags": 0,
+            "allow_loopback": False,
             "reason": 0,
             "strike_count": 0,
             "ttl_seconds": 0,

@@ -151,8 +151,78 @@ if ! echo "$EVENTS_OUT" | grep -q "BPRM_CHECK_SECURITY"; then
 fi
 echo "[+] EMPIRICAL PROOF: In-kernel BPF ringbuf event was consumed and validated by userspace bridge!"
 
-# 10. Clean Teardown
-echo "[*] Step 10: Terminating morayd..."
+# 10. Test Granular Network Policy: WAN Egress Denied with -EPERM (exit code 44)
+echo "[*] Step 10: Testing granular WAN egress block via BPF-LSM..."
+/tmp/victim_worker --wait-and-connect-wan 1.1.1.1 80 &
+WAN_PID=$!
+echo "[*] WAN victim spawned (PID: $WAN_PID)"
+
+while [ ! -f "/tmp/victim_${WAN_PID}.ready" ]; do
+    sleep 0.05
+done
+
+# Assert --block-wan (BLOCK_SOCKET | ALLOW_LOOPBACK)
+python3 bridge/lobster_hook.py --pid "$WAN_PID" --block-wan --map-path /sys/fs/bpf/moray/quarantine_map
+echo "[+] Asserted --block-wan policy on PID $WAN_PID"
+
+kill -USR1 "$WAN_PID"
+
+RET_WAN=0
+wait "$WAN_PID" || RET_WAN=$?
+if [ "$RET_WAN" -ne 44 ]; then
+    echo "[-] FATAL: WAN socket connect was NOT blocked with -EPERM! Exit code was $RET_WAN (expected 44: -EPERM)"
+    exit 1
+fi
+echo "[+] EMPIRICAL PROOF: WAN socket connect was blocked with -EPERM by Ring 0 BPF-LSM!"
+
+# 11. Test Granular Network Policy: Loopback Allowed past BPF-LSM (exit code 45)
+echo "[*] Step 11: Testing granular loopback exemption via BPF-LSM..."
+/tmp/victim_worker --wait-and-connect-loopback 80 &
+LOOP_PID=$!
+echo "[*] Loopback victim spawned (PID: $LOOP_PID)"
+
+while [ ! -f "/tmp/victim_${LOOP_PID}.ready" ]; do
+    sleep 0.05
+done
+
+python3 bridge/lobster_hook.py --pid "$LOOP_PID" --block-wan --map-path /sys/fs/bpf/moray/quarantine_map
+echo "[+] Asserted --block-wan policy on PID $LOOP_PID"
+
+kill -USR1 "$LOOP_PID"
+
+RET_LOOP=0
+wait "$LOOP_PID" || RET_LOOP=$?
+if [ "$RET_LOOP" -ne 45 ]; then
+    echo "[-] FATAL: Loopback connect was blocked by LSM! Exit code was $RET_LOOP (expected 45: permitted past LSM)"
+    exit 1
+fi
+echo "[+] EMPIRICAL PROOF: Loopback socket connect was permitted by Ring 0 BPF-LSM under --block-wan!"
+
+# 12. Test Total Network Block: Deny All Net Blocks Loopback with -EPERM (exit code 48)
+echo "[*] Step 12: Testing total network block (--deny-all-net) denying loopback with -EPERM..."
+/tmp/victim_worker --wait-and-assert-loopback-blocked 80 &
+DENY_PID=$!
+echo "[*] Deny-all victim spawned (PID: $DENY_PID)"
+
+while [ ! -f "/tmp/victim_${DENY_PID}.ready" ]; do
+    sleep 0.05
+done
+
+python3 bridge/lobster_hook.py --pid "$DENY_PID" --deny-all-net --map-path /sys/fs/bpf/moray/quarantine_map
+echo "[+] Asserted --deny-all-net policy on PID $DENY_PID"
+
+kill -USR1 "$DENY_PID"
+
+RET_DENY=0
+wait "$DENY_PID" || RET_DENY=$?
+if [ "$RET_DENY" -ne 48 ]; then
+    echo "[-] FATAL: Loopback was NOT blocked under --deny-all-net! Exit code was $RET_DENY (expected 48: -EPERM)"
+    exit 1
+fi
+echo "[+] EMPIRICAL PROOF: Total network block severed loopback socket with -EPERM!"
+
+# 13. Clean Teardown
+echo "[*] Step 13: Terminating morayd..."
 kill -TERM "$DAEMON_PID"
 sleep 1
 
