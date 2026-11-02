@@ -14,6 +14,8 @@ typedef unsigned int       __u32;
 typedef unsigned long long __u64;
 typedef signed int         __s32;
 typedef signed long long   __s64;
+typedef __u16              __be16;
+typedef __u32              __be32;
 #elif defined(__linux__) || defined(__KERNEL__)
 #include <linux/types.h>
 #else
@@ -24,6 +26,8 @@ typedef uint32_t __u32;
 typedef uint64_t __u64;
 typedef int32_t  __s32;
 typedef int64_t  __s64;
+typedef uint16_t __be16;
+typedef uint32_t __be32;
 #endif
 
 /* Pinned VFS Paths */
@@ -42,6 +46,7 @@ typedef int64_t  __s64;
 #define MORAY_ACT_BLOCK_SOCKET  0x02U  /* Sever socket_connect */
 #define MORAY_ACT_DROP_NET      0x04U  /* XDP wire-level frame drop */
 #define MORAY_ACT_KILL          0x08U  /* Signal immediate termination */
+#define MORAY_ACT_ALLOW_LOOPBACK 0x10U /* Granular policy: Allow AF_UNIX and 127.0.0.1/::1 */
 #define MORAY_ACT_FULL_STRIKE   0xFFU  /* Full containment shutdown */
 
 /* Strike Reason Codes */

@@ -16,6 +16,15 @@ int main(void) {
     assert(offsetof(struct moray_quarantine_entry, strike_count) == 16);
     assert(offsetof(struct moray_quarantine_entry, ttl_seconds) == 20);
 
+    /* Verify Action Bitmask Flags */
+    assert(MORAY_ACT_BLOCK_EXEC == 0x01);
+    assert(MORAY_ACT_BLOCK_SOCKET == 0x02);
+    assert(MORAY_ACT_DROP_NET == 0x04);
+    assert(MORAY_ACT_KILL == 0x08);
+    assert(MORAY_ACT_ALLOW_LOOPBACK == 0x10);
+    assert((MORAY_ACT_BLOCK_EXEC & MORAY_ACT_BLOCK_SOCKET) == 0);
+    assert((MORAY_ACT_BLOCK_SOCKET & MORAY_ACT_ALLOW_LOOPBACK) == 0);
+
     /* Verify moray_event */
     printf("[-] sizeof(struct moray_event) = %zu\n", sizeof(struct moray_event));
     assert(sizeof(struct moray_event) == 128);

@@ -101,7 +101,8 @@ int moray_bprm_strike(struct linux_binprm *bprm)
 
 /*
  * Pharyngeal Strike 2: Sever Outbound Network Socket Initiation
- * Invariant I_1: Quarantined PID cannot establish network connections.
+ * Invariant I_1 / I_4: Quarantined PID cannot establish unauthorized network connections.
+ * Invariant I_4: Granular Network Egress Filtering allows loopback/IPC if MORAY_ACT_ALLOW_LOOPBACK is set.
  */
 SEC("lsm/socket_connect")
 int moray_socket_strike(struct socket *sock, struct sockaddr *address, int addrlen)
@@ -116,10 +117,47 @@ int moray_socket_strike(struct socket *sock, struct sockaddr *address, int addrl
     }
 
     if (entry && (entry->action_flags & MORAY_ACT_BLOCK_SOCKET)) {
-        __sync_fetch_and_add(&entry->strike_count, 1);
-        bpf_printk("MORAY STRIKE: Intercepted socket connect from PID %d\n", tgid);
-        emit_strike_event(pid, tgid, entry->action_flags, -1, MORAY_HOOK_SOCKET, entry->strike_count);
+        /* If granular loopback policy is set, permit local IPC and localhost loopback */
+        if ((entry->action_flags & MORAY_ACT_ALLOW_LOOPBACK) && address && addrlen > 0) {
+            sa_family_t family = 0;
+            if (bpf_probe_read_kernel(&family, sizeof(family), &address->sa_family) == 0) {
+                /* Allow local Unix Domain Sockets */
+                if (family == AF_UNIX) {
+                    return 0;
+                }
+                /* Check IPv4 loopback (127.0.0.0/8) */
+                if (family == AF_INET && addrlen >= sizeof(struct sockaddr_in)) {
+                    struct sockaddr_in in = {};
+                    if (bpf_probe_read_kernel(&in, sizeof(in), address) == 0) {
+                        __u32 host_ip = bpf_ntohl(in.sin_addr.s_addr);
+                        if ((host_ip & 0xFF000000) == 0x7F000000) {
+                            return 0; /* Loopback IPv4 allowed */
+                        }
+                    }
+                }
+                /* Check IPv6 loopback (::1) */
+                if (family == AF_INET6 && addrlen >= sizeof(struct sockaddr_in6)) {
+                    struct sockaddr_in6 in6 = {};
+                    if (bpf_probe_read_kernel(&in6, sizeof(in6), address) == 0) {
+                        if (in6.sin6_addr.in6_u.u6_addr32[0] == 0 &&
+                            in6.sin6_addr.in6_u.u6_addr32[1] == 0 &&
+                            in6.sin6_addr.in6_u.u6_addr32[2] == 0 &&
+                            in6.sin6_addr.in6_u.u6_addr32[3] == bpf_htonl(1)) {
+                            return 0; /* Loopback IPv6 allowed */
+                        }
+                    }
+                }
+            }
+        }
 
+        __u32 hits = __sync_fetch_and_add(&entry->strike_count, 1) + 1;
+        bpf_printk("MORAY STRIKE: Intercepted socket connect from PID %d (hits: %d)\n", tgid, hits);
+        emit_strike_event(pid, tgid, entry->action_flags, -1, MORAY_HOOK_SOCKET, hits);
+
+        /* Dynamic Escalation: Auto-terminate target if hits reach Tier 3 or kill flag is asserted */
+        if ((entry->action_flags & MORAY_ACT_KILL) || hits >= MORAY_STRIKE_TIER3) {
+            bpf_send_signal(9); /* SIGKILL */
+        }
         return -1; /* -EPERM */
     }
 

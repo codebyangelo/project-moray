@@ -224,6 +224,40 @@ If the agent has been remediated or quarantined under a temporary TTL policy:
    python3 /usr/local/bin/lobster-hook --pid 4096 --check
    ```
 
+### IR-05: Granular Network Egress Enforcement & Socket Isolation
+When containing an agent that must remain capable of communicating with a local supervisor via IPC (`AF_UNIX`) or local model runtime (`127.0.0.1` / `::1`) but must be strictly severed from external WAN traffic:
+
+1. **Assert Granular WAN Egress Block (Permitting Loopback/IPC)**:
+   ```bash
+   python3 bridge/lobster_hook.py --pid 4096 --block-wan
+   ```
+
+2. **Assert Total Network Block (Severing All Sockets Including Loopback)**:
+   ```bash
+   python3 bridge/lobster_hook.py --pid 4096 --deny-all-net
+   ```
+
+3. **Verify Active Network Isolation Policy**:
+   ```bash
+   python3 bridge/lobster_hook.py --pid 4096 --status --json
+   ```
+   **Output Inspection**:
+   ```json
+   {
+     "pid": 4096,
+     "state": "ACTIVE",
+     "quarantined": true,
+     "action_flags": 18,
+     "allow_loopback": true,
+     "reason": 1,
+     "strike_count": 0,
+     "ttl_seconds": 0,
+     "remaining_seconds": 0
+   }
+   ```
+   - `action_flags: 18` corresponds to `0x02` (`BLOCK_SOCKET`) | `0x10` (`ALLOW_LOOPBACK`).
+   - `allow_loopback: true` confirms the kernel BPF-LSM hook exempts `AF_UNIX` and `127.0.0.0/8` / `::1`.
+
 ---
 
 ## 5. Disaster Recovery & Break-Glass Procedures

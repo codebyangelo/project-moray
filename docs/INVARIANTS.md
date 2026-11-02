@@ -48,6 +48,18 @@ This document codifies the core architectural invariants of Project Moray (`mora
 * **Enforcement Point**: Workspace Rules & Operational Guardrails: Rule 3.
 * **Verification**: Verifiable Git commits via `git log --format='%ad %h'`.
 
+### Invariant 7: Containment Self-Defense & Anti-Tamper Protection ($I_7$)
+* **Definition**: Quarantined processes cannot invoke `bpf()` syscall or tamper with loaded Moray probes or maps.
+* **Mechanism**: `moray_bpf_strike` intercepts `lsm/bpf` and returns `-EPERM` for any quarantined PID.
+* **Enforcement Point**: `moray_kern.bpf.c` and `bridge/lobster_hook.py` (`report_tamper`).
+* **Verification**: `tests/test_anti_tamper.py` and `tests/run_live_kernel_test.sh` (Step 7).
+
+### Invariant 8: Granular Egress & Semantic Network Isolation ($I_8$)
+* **Definition**: When `MORAY_ACT_BLOCK_SOCKET` is active, outbound network socket creation is denied with `-EPERM`. If `MORAY_ACT_ALLOW_LOOPBACK` (`0x10`) is explicitly granted, local IPC (`AF_UNIX`) and localhost destinations (`127.0.0.0/8`, `::1`) are permitted while strictly severing external WAN egress attempts.
+* **Mechanism**: `moray_socket_strike` inspects destination sockaddr via `bpf_probe_read_kernel`, discriminating loopback and UNIX families from external WAN addresses.
+* **Enforcement Point**: `moray_kern.bpf.c` (`SEC("lsm/socket_connect")`) and `bridge/lobster_hook.py`.
+* **Verification**: `tests/test_network_policy.py` and `tests/run_live_kernel_test.sh` (Steps 10, 11, 12).
+
 ---
 
 ## 📊 Invariant Verification Matrix
@@ -58,6 +70,8 @@ This document codifies the core architectural invariants of Project Moray (`mora
 | **$I_2$** | `moray_kern.bpf.c` | Microbenchmark harness | Delta syscall overhead < 1% for benign PID. |
 | **$I_3$** | `lsm/bpf` | `tests/test_anti_tamper.py` | EPERM returned on unauthorized BPF map manipulation. |
 | **$I_4$** | `src/moray.h` | `tests/test_struct_layout.c` | Static assertion `sizeof(struct moray_event) == 128`. |
+| **$I_7$** | `lsm/bpf` | `tests/test_anti_tamper.py` | Quarantined PID calling `sys_bpf` receives `-EPERM`. |
+| **$I_8$** | `lsm/socket_connect` | `tests/test_network_policy.py` | WAN blocked with `-EPERM`; loopback allowed when flag asserted. |
 | **$I_5$** | `src/moray.h`, `lobster_hook.py` | `tests/test_struct_layout.c` | Struct offsets match Python `ctypes.sizeof()`. |
 | **$I_6$** | Repository Git history | Differential CI check | Zero synthetic commit hashes or ungrounded claims. |
 | **$I_7$** | `bridge/lobster_hook.py` | `tests/test_adversarial.py` | 64KB heap ceiling clamp, `fcntl.flock` serialization, and strict PID validation. |

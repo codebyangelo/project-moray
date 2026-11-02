@@ -26,6 +26,7 @@ MORAY_ACT_BLOCK_EXEC: int = 0x01
 MORAY_ACT_BLOCK_SOCKET: int = 0x02
 MORAY_ACT_DROP_NET: int = 0x04
 MORAY_ACT_KILL: int = 0x08
+MORAY_ACT_ALLOW_LOOPBACK: int = 0x10  # Granular policy: Allow AF_UNIX and 127.0.0.1/::1
 MORAY_ACT_FULL_STRIKE: int = 0xFF
 
 # Reason Codes matching src/moray.h
@@ -550,14 +551,19 @@ class MorayHook:
         action_flags: int = MORAY_ACT_FULL_STRIKE,
         reason: int = MORAY_REASON_LOBSTER_L7,
         ttl_seconds: int = 0,
+        allow_loopback: bool = False,
     ) -> bool:
         """
         Register a process PID in the quarantine map to trigger an in-kernel strike.
         ttl_seconds: 0 for permanent quarantine, >0 for auto-expiring containment.
+        allow_loopback: If True, set MORAY_ACT_ALLOW_LOOPBACK to permit loopback & AF_UNIX.
         """
         validate_pid(pid)
         if not isinstance(ttl_seconds, int) or isinstance(ttl_seconds, bool) or ttl_seconds < 0:
             raise MorayQuarantineError(f"TTL must be a non-negative integer, got {ttl_seconds}")
+
+        if allow_loopback:
+            action_flags |= MORAY_ACT_ALLOW_LOOPBACK
 
         entry = MorayQuarantineEntry()
         entry.action_flags = action_flags
@@ -659,6 +665,7 @@ class MorayHook:
                 "state": "NONE",
                 "quarantined": False,
                 "action_flags": 0,
+                "allow_loopback": False,
                 "reason": 0,
                 "strike_count": 0,
                 "ttl_seconds": 0,
@@ -677,6 +684,7 @@ class MorayHook:
             "state": "EXPIRED" if expired else "ACTIVE",
             "quarantined": not expired,
             "action_flags": entry.action_flags,
+            "allow_loopback": bool(entry.action_flags & MORAY_ACT_ALLOW_LOOPBACK),
             "reason": entry.reason,
             "strike_count": entry.strike_count,
             "ttl_seconds": entry.ttl_seconds,
@@ -952,6 +960,21 @@ def main() -> None:
         action="store_true",
         help="Assert immediate anti-tamper quarantine on target PID (reason=TAMPER_ATTEMPT)",
     )
+    parser.add_argument(
+        "--block-wan",
+        action="store_true",
+        help="Strike target PID with granular WAN egress block (permitting loopback/IPC)",
+    )
+    parser.add_argument(
+        "--deny-all-net",
+        action="store_true",
+        help="Strike target PID with total network block (severing all sockets and wire traffic)",
+    )
+    parser.add_argument(
+        "--allow-loopback",
+        action="store_true",
+        help="Permit loopback (127.0.0.1, ::1) and AF_UNIX IPC when blocking sockets",
+    )
     parser.add_argument("--release", action="store_true", help="Remove PID from quarantine")
     parser.add_argument(
         "--check", action="store_true", help="Check if PID is currently quarantined"
@@ -1033,15 +1056,75 @@ def main() -> None:
         if args.strike:
             if not args.pid:
                 parser.error("--strike requires --pid <PID>")
-            hook.strike(
-                args.pid, action_flags=args.action, reason=args.reason, ttl_seconds=args.ttl
-            )
+            action = args.action
+            if args.allow_loopback:
+                action |= MORAY_ACT_ALLOW_LOOPBACK
+            hook.strike(args.pid, action_flags=action, reason=args.reason, ttl_seconds=args.ttl)
             if args.json:
-                print(json.dumps({"status": "asserted", "pid": args.pid, "ttl_seconds": args.ttl}))
+                print(
+                    json.dumps(
+                        {
+                            "status": "asserted",
+                            "pid": args.pid,
+                            "action_flags": action,
+                            "ttl_seconds": args.ttl,
+                            "allow_loopback": bool(action & MORAY_ACT_ALLOW_LOOPBACK),
+                        }
+                    )
+                )
+            else:
+                ttl_msg = f" (TTL: {args.ttl}s)" if args.ttl > 0 else " (Permanent)"
+                loop_msg = (
+                    " [Granular Loopback Allowed]" if (action & MORAY_ACT_ALLOW_LOOPBACK) else ""
+                )
+                print(
+                    f"[+] MORAY STRIKE ASSERTED: PID {args.pid} entered in-kernel quarantine{ttl_msg}{loop_msg}."
+                )
+        elif args.block_wan:
+            if not args.pid:
+                parser.error("--block-wan requires --pid <PID>")
+            action = MORAY_ACT_BLOCK_SOCKET | MORAY_ACT_ALLOW_LOOPBACK
+            hook.strike(args.pid, action_flags=action, reason=args.reason, ttl_seconds=args.ttl)
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "status": "asserted",
+                            "policy": "block-wan",
+                            "pid": args.pid,
+                            "action_flags": action,
+                            "ttl_seconds": args.ttl,
+                            "allow_loopback": True,
+                        }
+                    )
+                )
             else:
                 ttl_msg = f" (TTL: {args.ttl}s)" if args.ttl > 0 else " (Permanent)"
                 print(
-                    f"[+] MORAY STRIKE ASSERTED: PID {args.pid} entered in-kernel quarantine{ttl_msg}."
+                    f"[+] MORAY GRANULAR EGRESS POLICY ASSERTED: PID {args.pid} blocked from WAN egress (loopback permitted){ttl_msg}."
+                )
+        elif args.deny_all_net:
+            if not args.pid:
+                parser.error("--deny-all-net requires --pid <PID>")
+            action = MORAY_ACT_BLOCK_SOCKET | MORAY_ACT_DROP_NET
+            hook.strike(args.pid, action_flags=action, reason=args.reason, ttl_seconds=args.ttl)
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "status": "asserted",
+                            "policy": "deny-all-net",
+                            "pid": args.pid,
+                            "action_flags": action,
+                            "ttl_seconds": args.ttl,
+                            "allow_loopback": False,
+                        }
+                    )
+                )
+            else:
+                ttl_msg = f" (TTL: {args.ttl}s)" if args.ttl > 0 else " (Permanent)"
+                print(
+                    f"[+] MORAY TOTAL NETWORK BLOCK ASSERTED: PID {args.pid} severed from all network activity{ttl_msg}."
                 )
         elif args.report_tamper:
             if not args.pid:
