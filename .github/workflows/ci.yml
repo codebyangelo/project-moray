@@ -9,6 +9,7 @@ on:
 
 jobs:
   build-and-test:
+    name: Hermetic Verification & Mock Suite
     runs-on: ubuntu-latest
 
     steps:
@@ -33,3 +34,41 @@ jobs:
     - name: Run Comprehensive Verification Pipeline
       run: |
         make verify
+
+  live-kernel-kvm:
+    name: Live Ring 0 Kernel Verification (KVM)
+    runs-on: ubuntu-latest
+    needs: build-and-test
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Install Toolchain, QEMU & virtme-ng
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang llvm gcc make libbpf-dev gcc-multilib linux-libc-dev qemu-system-x86
+        sudo pip install --break-system-packages virtme-ng
+
+    - name: Verify KVM Virtualization Acceleration & Kernel Permissions
+      run: |
+        if [ -e /dev/kvm ]; then
+          echo "[+] KVM acceleration available on runner"
+          sudo chmod 666 /dev/kvm
+        else
+          echo "[!] Warning: /dev/kvm not found; virtme-ng will use emulation"
+        fi
+        sudo chmod +r /boot/vmlinuz-* || true
+
+    - name: Build BPF Bytecode & Loader Daemon
+      run: |
+        make build
+
+    - name: Execute Live Ring 0 Test Suite in MicroVM
+      run: |
+        vng -v \
+            -r "/boot/vmlinuz-$(uname -r)" \
+            --append "lsm=landlock,lockdown,yama,bpf" \
+            --user root \
+            --cwd "$PWD" \
+            --exec "$PWD/tests/run_live_kernel_test.sh"

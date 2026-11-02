@@ -73,7 +73,6 @@ class MorayQuarantineEntry(ctypes.Structure):
     Size: 24 bytes (8-byte aligned). Matches src/moray.h exactly.
     """
 
-    _pack_ = 8
     _fields_ = [
         ("action_flags", ctypes.c_uint32),
         ("reason", ctypes.c_uint32),
@@ -89,7 +88,6 @@ class MorayEvent(ctypes.Structure):
     Size: 128 bytes (64-byte / cache-line aligned). Matches src/moray.h exactly.
     """
 
-    _pack_ = 8
     _fields_ = [
         ("timestamp_ns", ctypes.c_uint64),
         ("pid", ctypes.c_uint32),
@@ -107,6 +105,45 @@ class MorayEvent(ctypes.Structure):
 
 assert ctypes.sizeof(MorayQuarantineEntry) == 24, "MorayQuarantineEntry size mismatch"
 assert ctypes.sizeof(MorayEvent) == 128, "MorayEvent size mismatch"
+
+# BPF Syscall Command Codes & Flags
+BPF_MAP_CREATE: int = 0
+BPF_MAP_LOOKUP_ELEM: int = 1
+BPF_MAP_UPDATE_ELEM: int = 2
+BPF_MAP_DELETE_ELEM: int = 3
+BPF_OBJ_PIN: int = 6
+BPF_OBJ_GET: int = 7
+BPF_ANY: int = 0
+
+
+class BpfAttrObjGet(ctypes.Structure):
+    _fields_ = [
+        ("pathname", ctypes.c_uint64),
+        ("bpf_fd", ctypes.c_uint32),
+        ("file_flags", ctypes.c_uint32),
+    ]
+
+
+class BpfAttrMapElem(ctypes.Structure):
+    _fields_ = [
+        ("map_fd", ctypes.c_uint32),
+        ("pad0", ctypes.c_uint32),
+        ("key", ctypes.c_uint64),
+        ("value", ctypes.c_uint64),
+        ("flags", ctypes.c_uint64),
+    ]
+
+
+def get_bpf_syscall_nr() -> int:
+    """Return platform-specific __NR_bpf syscall number."""
+    arch = os.uname().machine
+    if arch in ("x86_64", "amd64"):
+        return 321
+    if arch in ("aarch64", "arm64"):
+        return 280
+    if arch.startswith("arm"):
+        return 386
+    return 321
 
 
 class MorayQuarantineError(Exception):
@@ -142,6 +179,7 @@ class MorayHook:
         self.map_path: str = map_path
         self.mock_mode: bool = mock_mode
         self._mock_table: dict[int, MorayQuarantineEntry] = {}
+        self._bpf_map_fd: int = -1
 
         # Anti-Traversal Invariant: Reject symbolic links to prevent state redirection
         if os.path.islink(self.map_path):
@@ -154,6 +192,32 @@ class MorayHook:
 
         if self.mock_mode:
             self._with_lock(self._load_mock_file)
+        else:
+            self._open_bpf_map()
+
+    def _open_bpf_map(self) -> None:
+        """Open pinned BPF map via sys_bpf(BPF_OBJ_GET)."""
+        libc = ctypes.CDLL(None, use_errno=True)
+        b_path = self.map_path.encode("utf-8")
+        path_buf = ctypes.create_string_buffer(b_path)
+        attr = BpfAttrObjGet(
+            pathname=ctypes.cast(path_buf, ctypes.c_void_p).value or 0,
+            bpf_fd=0,
+            file_flags=0,
+        )
+        nr = get_bpf_syscall_nr()
+        fd = libc.syscall(nr, BPF_OBJ_GET, ctypes.byref(attr), ctypes.sizeof(attr))
+        if fd < 0:
+            err = ctypes.get_errno()
+            raise MorayQuarantineError(
+                f"Failed to access pinned BPF map at '{self.map_path}': {os.strerror(err)} (code {err})"
+            )
+        self._bpf_map_fd = fd
+
+    def close(self) -> None:
+        if self._bpf_map_fd >= 0:
+            os.close(self._bpf_map_fd)
+            self._bpf_map_fd = -1
 
     def _with_lock(self, func: Callable[[], T]) -> T:
         """Serialize map operations across processes and threads using POSIX file lock."""
@@ -493,20 +557,76 @@ class MorayHook:
             raise MorayQuarantineError(f"Failed to load mock map: {exc}") from exc
 
     def _bpf_update_elem(self, pid: int, entry: MorayQuarantineEntry) -> bool:
-        self._mock_table[pid] = entry
-        self._sync_mock_file()
+        if self.mock_mode or self._bpf_map_fd < 0:
+            self._mock_table[pid] = entry
+            self._sync_mock_file()
+            return True
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        k = ctypes.c_uint32(pid)
+        attr = BpfAttrMapElem(
+            map_fd=self._bpf_map_fd,
+            pad0=0,
+            key=ctypes.addressof(k),
+            value=ctypes.addressof(entry),
+            flags=BPF_ANY,
+        )
+        nr = get_bpf_syscall_nr()
+        ret = libc.syscall(nr, BPF_MAP_UPDATE_ELEM, ctypes.byref(attr), ctypes.sizeof(attr))
+        if ret != 0:
+            err = ctypes.get_errno()
+            raise MorayQuarantineError(f"bpf(BPF_MAP_UPDATE_ELEM) failed: {os.strerror(err)}")
         return True
 
     def _bpf_lookup_elem(self, pid: int) -> MorayQuarantineEntry | None:
-        self._load_mock_file()
-        return self._mock_table.get(pid)
+        if self.mock_mode or self._bpf_map_fd < 0:
+            self._load_mock_file()
+            return self._mock_table.get(pid)
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        k = ctypes.c_uint32(pid)
+        entry = MorayQuarantineEntry()
+        attr = BpfAttrMapElem(
+            map_fd=self._bpf_map_fd,
+            pad0=0,
+            key=ctypes.addressof(k),
+            value=ctypes.addressof(entry),
+            flags=0,
+        )
+        nr = get_bpf_syscall_nr()
+        ret = libc.syscall(nr, BPF_MAP_LOOKUP_ELEM, ctypes.byref(attr), ctypes.sizeof(attr))
+        if ret != 0:
+            err = ctypes.get_errno()
+            if err == 2:  # ENOENT (entry not present in map)
+                return None
+            raise MorayQuarantineError(f"bpf(BPF_MAP_LOOKUP_ELEM) failed: {os.strerror(err)}")
+        return entry
 
     def _bpf_delete_elem(self, pid: int) -> bool:
-        if pid in self._mock_table:
-            del self._mock_table[pid]
-            self._sync_mock_file()
-            return True
-        return False
+        if self.mock_mode or self._bpf_map_fd < 0:
+            if pid in self._mock_table:
+                del self._mock_table[pid]
+                self._sync_mock_file()
+                return True
+            return False
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        k = ctypes.c_uint32(pid)
+        attr = BpfAttrMapElem(
+            map_fd=self._bpf_map_fd,
+            pad0=0,
+            key=ctypes.addressof(k),
+            value=0,
+            flags=0,
+        )
+        nr = get_bpf_syscall_nr()
+        ret = libc.syscall(nr, BPF_MAP_DELETE_ELEM, ctypes.byref(attr), ctypes.sizeof(attr))
+        if ret != 0:
+            err = ctypes.get_errno()
+            if err == 2:  # ENOENT
+                return False
+            raise MorayQuarantineError(f"bpf(BPF_MAP_DELETE_ELEM) failed: {os.strerror(err)}")
+        return True
 
 
 def main() -> None:

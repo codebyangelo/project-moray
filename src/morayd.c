@@ -18,6 +18,8 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/vfs.h>
+#include <bpf/libbpf.h>
+#include <bpf/bpf.h>
 #include "moray.h"
 
 #ifndef BPF_FS_MAGIC
@@ -131,6 +133,113 @@ static int init_mock_quarantine(const char *path) {
     return 0;
 }
 
+/* Live BPF Runtime Context */
+struct moray_bpf_context {
+    struct bpf_object *obj;
+    struct bpf_link *link_bprm;
+    struct bpf_link *link_socket;
+    struct bpf_link *link_bpf;
+    struct bpf_map *map_quarantine;
+    struct bpf_map *map_events;
+};
+
+static int load_and_attach_bpf(const char *bpf_obj_path, const char *pin_dir, struct moray_bpf_context *ctx) {
+    char q_pin[256];
+    char e_pin[256];
+    snprintf(q_pin, sizeof(q_pin), "%s/quarantine_map", pin_dir);
+    snprintf(e_pin, sizeof(e_pin), "%s/events", pin_dir);
+
+    fprintf(stdout, "[*] Loading Ring 0 BPF object from: %s\n", bpf_obj_path);
+    ctx->obj = bpf_object__open_file(bpf_obj_path, NULL);
+    if (!ctx->obj) {
+        fprintf(stderr, "[-] Failed to open BPF object '%s': %s\n", bpf_obj_path, strerror(errno));
+        return -1;
+    }
+
+    int err = bpf_object__load(ctx->obj);
+    if (err) {
+        fprintf(stderr, "[-] In-kernel BPF verifier rejected object '%s': %s (code %d)\n", bpf_obj_path, strerror(-err), err);
+        bpf_object__close(ctx->obj);
+        ctx->obj = NULL;
+        return -1;
+    }
+    fprintf(stdout, "[+] In-kernel BPF verifier passed cleanly. Bytecode loaded into Ring 0.\n");
+
+    /* Attach LSM hooks */
+    struct bpf_program *prog_bprm = bpf_object__find_program_by_name(ctx->obj, "moray_bprm_strike");
+    if (prog_bprm) {
+        ctx->link_bprm = bpf_program__attach_lsm(prog_bprm);
+        if (!ctx->link_bprm) {
+            fprintf(stderr, "[-] Warning: Failed to attach moray_bprm_strike: %s\n", strerror(errno));
+        } else {
+            fprintf(stdout, "[+] Attached LSM hook: bprm_check_security (moray_bprm_strike)\n");
+        }
+    }
+
+    struct bpf_program *prog_socket = bpf_object__find_program_by_name(ctx->obj, "moray_socket_strike");
+    if (prog_socket) {
+        ctx->link_socket = bpf_program__attach_lsm(prog_socket);
+        if (!ctx->link_socket) {
+            fprintf(stderr, "[-] Warning: Failed to attach moray_socket_strike: %s\n", strerror(errno));
+        } else {
+            fprintf(stdout, "[+] Attached LSM hook: socket_connect (moray_socket_strike)\n");
+        }
+    }
+
+    struct bpf_program *prog_bpf = bpf_object__find_program_by_name(ctx->obj, "moray_bpf_strike");
+    if (prog_bpf) {
+        ctx->link_bpf = bpf_program__attach_lsm(prog_bpf);
+        if (!ctx->link_bpf) {
+            fprintf(stderr, "[-] Warning: Failed to attach moray_bpf_strike: %s\n", strerror(errno));
+        } else {
+            fprintf(stdout, "[+] Attached LSM hook: bpf (moray_bpf_strike)\n");
+        }
+    }
+
+    /* Pin quarantine map */
+    ctx->map_quarantine = bpf_object__find_map_by_name(ctx->obj, "moray_quarantine_map");
+    if (ctx->map_quarantine) {
+        unlink(q_pin);
+        err = bpf_map__pin(ctx->map_quarantine, q_pin);
+        if (err) {
+            fprintf(stderr, "[-] Failed to pin quarantine map to '%s': %s\n", q_pin, strerror(-err));
+            return -1;
+        }
+        fprintf(stdout, "[+] Pinned quarantine map to: %s\n", q_pin);
+    }
+
+    /* Pin events ringbuf */
+    ctx->map_events = bpf_object__find_map_by_name(ctx->obj, "moray_events");
+    if (ctx->map_events) {
+        unlink(e_pin);
+        err = bpf_map__pin(ctx->map_events, e_pin);
+        if (err) {
+            fprintf(stderr, "[-] Warning: Failed to pin events map to '%s': %s\n", e_pin, strerror(-err));
+        } else {
+            fprintf(stdout, "[+] Pinned events ringbuf to: %s\n", e_pin);
+        }
+    }
+
+    return 0;
+}
+
+static void cleanup_bpf(struct moray_bpf_context *ctx, const char *pin_dir) {
+    if (!ctx) return;
+    if (ctx->link_bprm) bpf_link__destroy(ctx->link_bprm);
+    if (ctx->link_socket) bpf_link__destroy(ctx->link_socket);
+    if (ctx->link_bpf) bpf_link__destroy(ctx->link_bpf);
+    if (ctx->obj) bpf_object__close(ctx->obj);
+
+    if (pin_dir) {
+        char q_pin[256];
+        char e_pin[256];
+        snprintf(q_pin, sizeof(q_pin), "%s/quarantine_map", pin_dir);
+        snprintf(e_pin, sizeof(e_pin), "%s/events", pin_dir);
+        unlink(q_pin);
+        unlink(e_pin);
+    }
+}
+
 int main(int argc, char **argv) {
     /* Line-buffered stdout and unbuffered stderr for real-time logging */
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -138,17 +247,21 @@ int main(int argc, char **argv) {
 
     bool mock_mode = false;
     const char *pin_dir = MORAY_PIN_DIR;
+    const char *bpf_obj_path = "build/moray_kern.bpf.o";
     char quarantine_path[256];
     char events_path[256];
+    struct moray_bpf_context bpf_ctx;
+    memset(&bpf_ctx, 0, sizeof(bpf_ctx));
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             fprintf(stdout, "Usage: %s [options]\n", argv[0]);
             fprintf(stdout, "Options:\n");
-            fprintf(stdout, "  --mock [dir]   Run in mock mode using filesystem backing (for unprivileged testing)\n");
-            fprintf(stdout, "  --preflight    Execute live kernel preflight checks and exit\n");
-            fprintf(stdout, "  --pin-dir <dir> Override default BPF pin directory (default: %s)\n", MORAY_PIN_DIR);
-            fprintf(stdout, "  --help         Show this help message\n");
+            fprintf(stdout, "  --mock [dir]     Run in mock mode using filesystem backing (for unprivileged testing)\n");
+            fprintf(stdout, "  --preflight      Execute live kernel preflight checks and exit\n");
+            fprintf(stdout, "  --pin-dir <dir>  Override default BPF pin directory (default: %s)\n", MORAY_PIN_DIR);
+            fprintf(stdout, "  --bpf-obj <path> Path to compiled BPF object (default: build/moray_kern.bpf.o)\n");
+            fprintf(stdout, "  --help           Show this help message\n");
             return 0;
         } else if (strcmp(argv[i], "--preflight") == 0) {
             print_banner();
@@ -162,6 +275,8 @@ int main(int argc, char **argv) {
             }
         } else if (strcmp(argv[i], "--pin-dir") == 0 && i + 1 < argc) {
             pin_dir = argv[++i];
+        } else if (strcmp(argv[i], "--bpf-obj") == 0 && i + 1 < argc) {
+            bpf_obj_path = argv[++i];
         }
     }
 
@@ -206,6 +321,16 @@ int main(int argc, char **argv) {
             return 1;
         }
         fprintf(stdout, "[*] Kernel BPF VFS path verified.\n");
+
+        /* Fallback check for bpf object if not in build/ */
+        if (access(bpf_obj_path, R_OK) != 0 && access("/usr/local/share/moray/moray_kern.bpf.o", R_OK) == 0) {
+            bpf_obj_path = "/usr/local/share/moray/moray_kern.bpf.o";
+        }
+
+        if (load_and_attach_bpf(bpf_obj_path, pin_dir, &bpf_ctx) != 0) {
+            fprintf(stderr, "[-] Failed to load and attach Ring 0 BPF program.\n");
+            return 1;
+        }
     }
 
     fprintf(stdout, "[+] morayd initialized successfully. Monitoring Ring 0 containment channels.\n");
@@ -217,5 +342,8 @@ int main(int argc, char **argv) {
     }
 
     fprintf(stdout, "\n[*] Signal received. Cleaning up and terminating morayd.\n");
+    if (!mock_mode) {
+        cleanup_bpf(&bpf_ctx, pin_dir);
+    }
     return 0;
 }
