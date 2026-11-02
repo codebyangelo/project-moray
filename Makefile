@@ -6,6 +6,12 @@ CLANG ?= clang
 CFLAGS ?= -Wall -Wextra -Werror -O2 -std=c11
 BPF_CFLAGS ?= -target bpf -O2 -g -Wall -Werror -Isrc
 
+ARCH ?= $(shell uname -m)
+MULTIARCH_INC ?= /usr/include/$(ARCH)-linux-gnu
+ifneq ($(wildcard $(MULTIARCH_INC)),)
+    BPF_CFLAGS += -I$(MULTIARCH_INC)
+endif
+
 SRC_DIR = src
 BUILD_DIR = build
 BIN_DIR = bin

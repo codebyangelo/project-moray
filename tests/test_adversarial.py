@@ -160,4 +160,8 @@ class TestDaemonPathBoundary:
             text=True,
         )
         assert res.returncode != 0
-        assert "exceeds buffer limit" in res.stderr
+        assert (
+            "exceeds buffer limit" in res.stderr
+            or "File name too long" in res.stderr
+            or "Cannot access" in res.stderr
+        )

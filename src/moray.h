@@ -7,7 +7,14 @@
 #ifndef _MORAY_H_
 #define _MORAY_H_
 
-#if defined(__linux__) || defined(__KERNEL__)
+#if defined(__bpf__)
+typedef unsigned char      __u8;
+typedef unsigned short     __u16;
+typedef unsigned int       __u32;
+typedef unsigned long long __u64;
+typedef signed int         __s32;
+typedef signed long long   __s64;
+#elif defined(__linux__) || defined(__KERNEL__)
 #include <linux/types.h>
 #else
 #include <stdint.h>
