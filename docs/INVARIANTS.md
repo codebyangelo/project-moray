@@ -60,3 +60,5 @@ This document codifies the core architectural invariants of Project Moray (`mora
 | **$I_4$** | `src/moray.h` | `tests/test_struct_layout.c` | Static assertion `sizeof(struct moray_event) == 128`. |
 | **$I_5$** | `src/moray.h`, `lobster_hook.py` | `tests/test_struct_layout.c` | Struct offsets match Python `ctypes.sizeof()`. |
 | **$I_6$** | Repository Git history | Differential CI check | Zero synthetic commit hashes or ungrounded claims. |
+| **$I_7$** | `bridge/lobster_hook.py` | `tests/test_adversarial.py` | 64KB heap ceiling clamp, `fcntl.flock` serialization, and strict PID validation. |
+| **$I_8$** | `src/moray_kern.bpf.c` | `tests/test_adversarial.py` | SMP atomic counters (`__sync_fetch_and_add`) and XDP EtherType wire validation. |
