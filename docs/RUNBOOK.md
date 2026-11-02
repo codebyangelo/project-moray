@@ -171,16 +171,28 @@ When an autonomous AI agent process is reported failing with `-EPERM` on executi
    - `strike_count`: Number of times the kernel blocked this process from executing disallowed actions.
 
 ### IR-02: Telemetry Extraction & Trace Inspection
-To inspect live interception events directly from the kernel trace pipe:
+To inspect live interception events directly from the Ring 0 ring buffer or the kernel trace pipe:
 
-```bash
-# Stream Ring 0 printk logs
-cat /sys/kernel/debug/tracing/trace_pipe | grep "MORAY STRIKE"
-```
-**Sample Trace**:
-```text
-agent-worker-4096  [002] d... 1421.501230: bpf_trace_printk: MORAY STRIKE: Intercepted execve from PID 4096 (hits: 3)
-```
+1. **Continuous Structured Audit Stream (SIEM / ndjson ingestion)**:
+   ```bash
+   python3 bridge/lobster_hook.py --stream-events --json
+   ```
+2. **Tail Recent Formatted Telemetry Lines**:
+   ```bash
+   python3 bridge/lobster_hook.py --tail-events --count 20
+   ```
+   **Sample Output**:
+   ```text
+   [2026-11-02 17:50:12.123] PID 191 (tgid: 191, comm: 'victim_worker') INTERCEPTED at BPRM_CHECK_SECURITY (action: 0x01, ret: -1, strikes: 1)
+   ```
+3. **Raw Ring 0 Printk Trace Stream (Fallback)**:
+   ```bash
+   cat /sys/kernel/debug/tracing/trace_pipe | grep "MORAY STRIKE"
+   ```
+   **Sample Trace**:
+   ```text
+   agent-worker-4096  [002] d... 1421.501230: bpf_trace_printk: MORAY STRIKE: Intercepted execve from PID 4096 (hits: 3)
+   ```
 
 ### IR-03: Strike Tier Escalation Handling
 Moray enforces dynamic strike escalation in Ring 0:
