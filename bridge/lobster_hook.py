@@ -332,6 +332,87 @@ class MorayHook:
             return self._with_lock(_do_list)
         return []
 
+    def flush_all(self, force: bool = False) -> int:
+        """
+        Emergency break-glass procedure: purge all entries from quarantine map.
+        Requires force=True to confirm intent. Returns count of purged entries.
+        """
+        if not force:
+            raise MorayQuarantineError(
+                "Emergency flush requires explicit confirmation (force=True / --force)."
+            )
+
+        if self.mock_mode:
+
+            def _do_flush() -> int:
+                self._load_mock_file()
+                count = len(self._mock_table)
+                self._mock_table.clear()
+                self._sync_mock_file()
+                return count
+
+            return self._with_lock(_do_flush)
+
+        return 0
+
+    def healthcheck(self) -> dict[str, object]:
+        """
+        Comprehensive operational liveness and readiness probe.
+        Evaluates bpffs mount, quarantine map presence, and LSM status.
+        """
+        warnings: list[str] = []
+        status: str = "healthy"
+        map_accessible = False
+        bpffs_mounted = False
+        bpf_lsm_active = False
+
+        if self.mock_mode:
+            map_accessible = True
+            bpffs_mounted = True
+            bpf_lsm_active = True
+        else:
+            if os.path.exists(self.map_path):
+                map_accessible = True
+            else:
+                warnings.append(f"Quarantine map pin not found: {self.map_path}")
+                status = "degraded"
+
+            if os.path.exists("/sys/fs/bpf"):
+                bpffs_mounted = True
+            else:
+                warnings.append("/sys/fs/bpf filesystem path does not exist")
+                status = "unhealthy"
+
+            lsm_path = "/sys/kernel/security/lsm"
+            if os.path.exists(lsm_path):
+                try:
+                    with open(lsm_path, encoding="utf-8") as f:
+                        content = f.read()
+                        if "bpf" in content:
+                            bpf_lsm_active = True
+                        else:
+                            warnings.append(
+                                f"BPF-LSM not active in {lsm_path} (active: '{content.strip()}')"
+                            )
+                            status = "degraded"
+                except OSError as exc:
+                    warnings.append(f"Cannot read {lsm_path}: {exc}")
+                    status = "degraded"
+            else:
+                warnings.append(f"{lsm_path} not found (securityfs not mounted)")
+                status = "degraded"
+
+        return {
+            "status": status,
+            "mock_mode": self.mock_mode,
+            "map_path": self.map_path,
+            "map_accessible": map_accessible,
+            "bpffs_mounted": bpffs_mounted,
+            "bpf_lsm_active": bpf_lsm_active,
+            "quarantined_count": len(self.list_quarantined()),
+            "warnings": warnings,
+        }
+
     # Internal atomic persistence with file locking and size clamping
     def _sync_mock_file(self) -> None:
         if os.path.islink(self.map_path):
@@ -427,6 +508,19 @@ def main() -> None:
         "--evict-expired", action="store_true", help="Purge all expired TTL quarantine entries"
     )
     parser.add_argument(
+        "--flush-all",
+        action="store_true",
+        help="Emergency purge of all quarantine entries (requires --force)",
+    )
+    parser.add_argument(
+        "--healthcheck", action="store_true", help="Run operational healthcheck and liveness probe"
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Confirm intent for destructive emergency operations like --flush-all",
+    )
+    parser.add_argument(
         "--ttl",
         type=int,
         default=0,
@@ -519,6 +613,30 @@ def main() -> None:
                 )
             else:
                 print(f"[+] EVICTED {len(evicted)} expired quarantine entries: {evicted}")
+        elif args.flush_all:
+            flushed = hook.flush_all(force=args.force)
+            if args.json:
+                print(json.dumps({"status": "flushed", "count": flushed}))
+            else:
+                print(f"[!] BREAK-GLASS FLUSH: Purged {flushed} quarantine entries.")
+        elif args.healthcheck:
+            health = hook.healthcheck()
+            if args.json:
+                print(json.dumps(health, indent=2))
+            else:
+                print(f"[*] Moray Containment Health: {health['status'].upper()}")
+                print(f"  Mock Mode:        {health['mock_mode']}")
+                print(f"  Map Path:         {health['map_path']}")
+                print(f"  Map Accessible:   {health['map_accessible']}")
+                print(f"  BPFFS Mounted:    {health['bpffs_mounted']}")
+                print(f"  BPF-LSM Active:   {health['bpf_lsm_active']}")
+                print(f"  Quarantined PIDs: {health['quarantined_count']}")
+                warnings_list = health.get("warnings", [])
+                if warnings_list and isinstance(warnings_list, list):
+                    print("  Warnings:")
+                    for w in warnings_list:
+                        print(f"    - {w}")
+            sys.exit(0 if health["status"] == "healthy" else 1)
         elif args.list:
             entries = hook.list_quarantined()
             if args.json:

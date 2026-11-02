@@ -1,0 +1,43 @@
+[Unit]
+Description=Project Moray Ring 0 eBPF Containment Daemon for Autonomous Agents
+Documentation=https://github.com/codebyangelo/project-moray
+After=network.target local-fs.target sys-fs-bpf.mount
+Wants=sys-fs-bpf.mount
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Fail-Closed Preflight: Verify BPF-LSM, bpffs, and root privileges before launch
+ExecStartPre=/usr/local/bin/morayd --preflight
+
+# Primary Daemon Service
+ExecStart=/usr/local/bin/morayd --pin-dir /sys/fs/bpf/moray
+
+# Graceful termination
+KillSignal=SIGTERM
+TimeoutStopSec=10s
+
+# Restart policy under failure
+Restart=on-failure
+RestartSec=5s
+
+# Security Hardening & Isolation Directives
+LimitMEMLOCK=infinity
+CapabilityBoundingSet=CAP_BPF CAP_SYS_ADMIN CAP_KILL CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_BPF CAP_SYS_ADMIN CAP_KILL
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+ReadWritePaths=/sys/fs/bpf
+
+[Install]
+WantedBy=multi-user.target
