@@ -1,5 +1,13 @@
 # Project Moray: OS-Level Ring 0 eBPF Containment Architecture
 
+[![CI: Build & Invariant Suite](https://github.com/codebyangelo/project-moray/actions/workflows/ci.yml/badge.svg)](https://github.com/codebyangelo/project-moray/actions/workflows/ci.yml)
+[![License: GPL-2.0](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](LICENSE)
+[![Kernel: eBPF LSM | XDP](https://img.shields.io/badge/Kernel-eBPF%20LSM%20%7C%20XDP-green.svg)](#-quick-architecture-overview)
+[![Python: >=3.10](https://img.shields.io/badge/Python-%3E%3D3.10-blue.svg)](#-subsystems)
+[![Ecosystem: Lobster | Moray | Octopus](https://img.shields.io/badge/Ecosystem-Lobster%20%7C%20Moray%20%7C%20Octopus-orange.svg)](#-quick-architecture-overview)
+[![Tests: 32 Passed](https://img.shields.io/badge/Tests-32%20Passed%20%7C%20Hermetic-brightgreen.svg)](#-building--running)
+[![Contract: Fail-Closed](https://img.shields.io/badge/Contract-Fail--Closed-red.svg)](docs/INVARIANTS.md)
+
 Project Moray (`morayd`) is an ultra-lightweight, zero-dependency in-kernel containment daemon and eBPF security subsystem. Operating in Ring 0 via BPF-LSM and XDP, Moray sits beneath user-space agent frameworks to terminate compromised processes, sever unauthorized network sockets, and drop malicious frames at the driver boundary before user-space context switches complete.
 
 ---
