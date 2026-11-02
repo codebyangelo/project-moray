@@ -73,7 +73,6 @@ class MorayQuarantineEntry(ctypes.Structure):
     Size: 24 bytes (8-byte aligned). Matches src/moray.h exactly.
     """
 
-    _pack_ = 8
     _fields_ = [
         ("action_flags", ctypes.c_uint32),
         ("reason", ctypes.c_uint32),
@@ -89,7 +88,6 @@ class MorayEvent(ctypes.Structure):
     Size: 128 bytes (64-byte / cache-line aligned). Matches src/moray.h exactly.
     """
 
-    _pack_ = 8
     _fields_ = [
         ("timestamp_ns", ctypes.c_uint64),
         ("pid", ctypes.c_uint32),
