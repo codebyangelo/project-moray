@@ -45,7 +45,7 @@ class TestBinaryContracts:
         assert MorayQuarantineEntry.reason.offset == 4
         assert MorayQuarantineEntry.timestamp_ns.offset == 8
         assert MorayQuarantineEntry.strike_count.offset == 16
-        assert MorayQuarantineEntry.reserved.offset == 20
+        assert MorayQuarantineEntry.ttl_seconds.offset == 20
 
     def test_event_member_offsets(self) -> None:
         assert MorayEvent.timestamp_ns.offset == 0
