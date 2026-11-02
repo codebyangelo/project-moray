@@ -2,7 +2,7 @@
 
 **Author:** Angelo Hershall Heith Ayton (`codebyangelo`)  
 **Subsystem:** Linux Ring 0 eBPF Containment Engine (`morayd`)  
-**Canonical File:** [`/root/home/projects/project-moray/docs/THREAT_MODEL.md`](file:///root/home/projects/project-moray/docs/THREAT_MODEL.md)  
+**Canonical File:** [`/root/home/projects/project-moray/docs/THREAT_MODEL.md`](/project-moray/docs/THREAT_MODEL.md)  
 **Status:** Authoritative Security Specification
 
 ---
