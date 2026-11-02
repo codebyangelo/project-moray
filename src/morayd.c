@@ -120,6 +120,14 @@ int main(int argc, char **argv) {
 
     fprintf(stdout, "[*] Target pin directory: %s\n", pin_dir);
 
+    int q_len = snprintf(quarantine_path, sizeof(quarantine_path), "%s/quarantine_map", pin_dir);
+    int e_len = snprintf(events_path, sizeof(events_path), "%s/events", pin_dir);
+    if (q_len < 0 || (size_t)q_len >= sizeof(quarantine_path) ||
+        e_len < 0 || (size_t)e_len >= sizeof(events_path)) {
+        fprintf(stderr, "[-] Target pin directory path exceeds buffer limit (%zu bytes)\n", sizeof(quarantine_path));
+        return 1;
+    }
+
     if (ensure_dir(pin_dir) != 0) {
         fprintf(stderr, "[-] Cannot access or create pin directory '%s': %s\n", pin_dir, strerror(errno));
         if (!mock_mode) {
@@ -127,9 +135,6 @@ int main(int argc, char **argv) {
         }
         return 1;
     }
-
-    snprintf(quarantine_path, sizeof(quarantine_path), "%s/quarantine_map", pin_dir);
-    snprintf(events_path, sizeof(events_path), "%s/events", pin_dir);
 
     if (mock_mode) {
         fprintf(stdout, "[*] Running in mock containment test mode...\n");

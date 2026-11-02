@@ -85,7 +85,7 @@ int moray_bprm_strike(struct linux_binprm *bprm)
     }
 
     if (entry && (entry->action_flags & MORAY_ACT_BLOCK_EXEC)) {
-        entry->strike_count++;
+        __sync_fetch_and_add(&entry->strike_count, 1);
         bpf_printk("MORAY STRIKE: Intercepted execve from PID %d (strikes: %d)\n", tgid, entry->strike_count);
         emit_strike_event(pid, tgid, entry->action_flags, -1, MORAY_HOOK_BPRM, entry->strike_count);
 
@@ -115,7 +115,7 @@ int moray_socket_strike(struct socket *sock, struct sockaddr *address, int addrl
     }
 
     if (entry && (entry->action_flags & MORAY_ACT_BLOCK_SOCKET)) {
-        entry->strike_count++;
+        __sync_fetch_and_add(&entry->strike_count, 1);
         bpf_printk("MORAY STRIKE: Intercepted socket connect from PID %d\n", tgid);
         emit_strike_event(pid, tgid, entry->action_flags, -1, MORAY_HOOK_SOCKET, entry->strike_count);
 
@@ -160,8 +160,19 @@ int moray_xdp_filter(struct xdp_md *ctx)
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
 
-    /* Basic Ethernet + IPv4 boundary check */
-    if (data + 14 + 20 > data_end) {
+    /* Verify Ethernet header boundary (14 bytes) */
+    if (data + 14 > data_end) {
+        return XDP_PASS;
+    }
+
+    /* Verify EtherType is IPv4 (0x0800) in wire order */
+    __u8 *eth_proto = (__u8 *)(data + 12);
+    if (eth_proto[0] != 0x08 || eth_proto[1] != 0x00) {
+        return XDP_PASS;
+    }
+
+    /* Verify IPv4 header minimum boundary (14 Ethernet + 20 IPv4 = 34 bytes) */
+    if (data + 34 > data_end) {
         return XDP_PASS;
     }
 

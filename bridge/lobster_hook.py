@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import fcntl
 import os
 import struct
 import sys
+import threading
 import time
+from collections.abc import Callable
+from typing import TypeVar
 
 # Action Flags matching src/moray.h
 MORAY_ACT_NONE: int = 0x00
@@ -34,8 +38,15 @@ DEFAULT_PIN_DIR: str = "/sys/fs/bpf/moray"
 DEFAULT_QUARANTINE_PIN: str = "/sys/fs/bpf/moray/quarantine_map"
 DEFAULT_EVENTS_PIN: str = "/sys/fs/bpf/moray/events"
 
+# Resource and Safety Ceilings
+MAX_MAP_FILE_BYTES: int = 64 * 1024  # 64 KB heap ceiling clamp (Radare2 Issue #12924)
+PID_MIN: int = 2  # PID 1 is kernel init/systemd (protected)
+PID_MAX: int = 4194304  # Linux /proc/sys/kernel/pid_max ceiling
+
 # Fail-Closed Exit Code contract
-FAIL_CLOSED_EXIT_CODE: int = 252  # -4 in uint8 / standard error
+FAIL_CLOSED_EXIT_CODE: int = 252  # -4 in uint8 / standard security error
+
+T = TypeVar("T")
 
 
 class MorayQuarantineEntry(ctypes.Structure):
@@ -84,6 +95,16 @@ class MorayQuarantineError(Exception):
     """Raised when Moray containment operations fail (Fail-Closed)."""
 
 
+def validate_pid(pid: int) -> None:
+    """
+    Strict validation of PID input. Rejects non-integers, booleans, and out-of-range PIDs.
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        raise MorayQuarantineError(f"PID must be an integer, got {type(pid).__name__}")
+    if pid < PID_MIN or pid > PID_MAX:
+        raise MorayQuarantineError(f"PID out of permissible range ({PID_MIN}-{PID_MAX}): {pid}")
+
+
 class MorayHook:
     """
     Controls containment quarantine entries via pinned BPF maps or mock test backings.
@@ -96,12 +117,23 @@ class MorayHook:
         self._mock_table: dict[int, MorayQuarantineEntry] = {}
 
         if not self.mock_mode and not os.path.exists(self.map_path):
-            # In test environments or PRoot containers where /sys/fs/bpf is unmounted,
-            # allow fallback to local mock backing
             self.mock_mode = True
 
         if self.mock_mode:
-            self._load_mock_file()
+            self._with_lock(self._load_mock_file)
+
+    def _with_lock(self, func: Callable[[], T]) -> T:
+        """Serialize map operations across processes and threads using POSIX file lock."""
+        lock_path = f"{self.map_path}.lock"
+        target_dir = os.path.dirname(self.map_path)
+        if target_dir:
+            os.makedirs(target_dir, exist_ok=True)
+        with open(lock_path, "w") as lock_f:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            try:
+                return func()
+            finally:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
 
     def strike(
         self,
@@ -112,8 +144,7 @@ class MorayHook:
         """
         Register a process PID in the quarantine map to trigger an in-kernel strike.
         """
-        if pid <= 0 or pid > 4194304:
-            raise MorayQuarantineError(f"Invalid target PID: {pid}")
+        validate_pid(pid)
 
         entry = MorayQuarantineEntry()
         entry.action_flags = action_flags
@@ -124,10 +155,14 @@ class MorayHook:
 
         try:
             if self.mock_mode:
-                self._load_mock_file()
-                self._mock_table[pid] = entry
-                self._sync_mock_file()
-                return True
+
+                def _do_strike() -> bool:
+                    self._load_mock_file()
+                    self._mock_table[pid] = entry
+                    self._sync_mock_file()
+                    return True
+
+                return self._with_lock(_do_strike)
             else:
                 return self._bpf_update_elem(pid, entry)
         except OSError as exc:
@@ -137,17 +172,20 @@ class MorayHook:
         """
         Remove a process PID from the quarantine map (clear strike).
         """
-        if pid <= 0:
-            raise MorayQuarantineError(f"Invalid target PID: {pid}")
+        validate_pid(pid)
 
         try:
             if self.mock_mode:
-                self._load_mock_file()
-                if pid in self._mock_table:
-                    del self._mock_table[pid]
-                    self._sync_mock_file()
-                    return True
-                return False
+
+                def _do_release() -> bool:
+                    self._load_mock_file()
+                    if pid in self._mock_table:
+                        del self._mock_table[pid]
+                        self._sync_mock_file()
+                        return True
+                    return False
+
+                return self._with_lock(_do_release)
             else:
                 return self._bpf_delete_elem(pid)
         except OSError as exc:
@@ -157,12 +195,16 @@ class MorayHook:
         """
         Check if a PID currently has an active quarantine strike.
         """
-        if pid <= 0:
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid < PID_MIN or pid > PID_MAX:
             return False
 
         if self.mock_mode:
-            self._load_mock_file()
-            return pid in self._mock_table
+
+            def _do_check() -> bool:
+                self._load_mock_file()
+                return pid in self._mock_table
+
+            return self._with_lock(_do_check)
 
         return self._bpf_lookup_elem(pid) is not None
 
@@ -170,12 +212,16 @@ class MorayHook:
         """
         Retrieve the quarantine entry for a given PID.
         """
-        if pid <= 0:
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid < PID_MIN or pid > PID_MAX:
             return None
 
         if self.mock_mode:
-            self._load_mock_file()
-            return self._mock_table.get(pid)
+
+            def _do_get() -> MorayQuarantineEntry | None:
+                self._load_mock_file()
+                return self._mock_table.get(pid)
+
+            return self._with_lock(_do_get)
 
         return self._bpf_lookup_elem(pid)
 
@@ -184,18 +230,30 @@ class MorayHook:
         List all active quarantine entries.
         """
         if self.mock_mode:
-            self._load_mock_file()
-            return list(self._mock_table.items())
+
+            def _do_list() -> list[tuple[int, MorayQuarantineEntry]]:
+                self._load_mock_file()
+                return list(self._mock_table.items())
+
+            return self._with_lock(_do_list)
         return []
 
-    # Internal persistence for mock/test environments
+    # Internal atomic persistence with file locking and size clamping
     def _sync_mock_file(self) -> None:
         try:
-            os.makedirs(os.path.dirname(self.map_path), exist_ok=True)
-            with open(self.map_path, "wb") as f:
+            target_dir = os.path.dirname(self.map_path)
+            if target_dir:
+                os.makedirs(target_dir, exist_ok=True)
+
+            tmp_path = f"{self.map_path}.tmp.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}"
+            with open(tmp_path, "wb") as f:
                 for pid, entry in self._mock_table.items():
                     f.write(struct.pack("<I", pid))
                     f.write(bytes(entry))
+                f.flush()
+                os.fsync(f.fileno())
+
+            os.replace(tmp_path, self.map_path)
         except OSError as exc:
             raise MorayQuarantineError(f"Failed to sync mock map: {exc}") from exc
 
@@ -203,9 +261,26 @@ class MorayHook:
         if not os.path.exists(self.map_path):
             return
         try:
+            sz = os.path.getsize(self.map_path)
+            if sz > MAX_MAP_FILE_BYTES:
+                raise MorayQuarantineError(
+                    f"Map file size exceeds {MAX_MAP_FILE_BYTES} byte ceiling: {sz}"
+                )
+
             with open(self.map_path, "rb") as f:
-                data = f.read()
+                data = f.read(MAX_MAP_FILE_BYTES + 1)
+
+            if len(data) > MAX_MAP_FILE_BYTES:
+                raise MorayQuarantineError(
+                    f"Map payload exceeds {MAX_MAP_FILE_BYTES} byte ceiling: {len(data)}"
+                )
+
             entry_sz = 4 + ctypes.sizeof(MorayQuarantineEntry)  # 4 + 24 = 28
+            if len(data) % entry_sz != 0:
+                raise MorayQuarantineError(
+                    f"Corrupted quarantine map: size {len(data)} is not a multiple of {entry_sz}"
+                )
+
             count = len(data) // entry_sz
             self._mock_table.clear()
             for i in range(count):
@@ -213,8 +288,8 @@ class MorayHook:
                 pid = struct.unpack("<I", chunk[:4])[0]
                 entry = MorayQuarantineEntry.from_buffer_copy(chunk[4:])
                 self._mock_table[pid] = entry
-        except OSError:
-            pass
+        except OSError as exc:
+            raise MorayQuarantineError(f"Failed to load mock map: {exc}") from exc
 
     def _bpf_update_elem(self, pid: int, entry: MorayQuarantineEntry) -> bool:
         self._mock_table[pid] = entry
