@@ -704,6 +704,8 @@ class MorayHook:
 
     def _with_lock(self, func: Callable[[], T]) -> T:
         """Serialize map operations across processes and threads using POSIX file lock."""
+        if not self.mock_mode or self.map_path.startswith("/sys/fs/bpf"):
+            return func()
         lock_path = f"{self.map_path}.lock"
         target_dir = os.path.dirname(self.map_path)
         if target_dir:
@@ -717,6 +719,8 @@ class MorayHook:
 
     def _with_xdp_lock(self, func: Callable[[], T]) -> T:
         """Serialize XDP map operations across processes and threads using POSIX file lock."""
+        if not self.mock_mode or self.xdp_map_path.startswith("/sys/fs/bpf"):
+            return func()
         lock_path = f"{self.xdp_map_path}.lock"
         target_dir = os.path.dirname(self.xdp_map_path)
         if target_dir:
@@ -730,6 +734,8 @@ class MorayHook:
 
     def _with_cgroup_lock(self, func: Callable[[], T]) -> T:
         """Serialize cgroup map operations across processes and threads using POSIX file lock."""
+        if not self.mock_mode or self.cgroup_map_path.startswith("/sys/fs/bpf"):
+            return func()
         lock_path = f"{self.cgroup_map_path}.lock"
         target_dir = os.path.dirname(self.cgroup_map_path)
         if target_dir:
@@ -1570,52 +1576,67 @@ class MorayHook:
             ttl_seconds=ttl_seconds,
         )
 
-        def _do_quarantine() -> bool:
-            return self._bpf_cgroup_update_elem(cgroup_id, entry)
+        if self.mock_mode:
 
-        return self._with_cgroup_lock(_do_quarantine)
+            def _do_quarantine() -> bool:
+                return self._bpf_cgroup_update_elem(cgroup_id, entry)
+
+            return self._with_cgroup_lock(_do_quarantine)
+
+        if self._bpf_cgroup_fd < 0 and os.path.exists(self.cgroup_map_path):
+            self._open_bpf_cgroup_map()
+        return self._bpf_cgroup_update_elem(cgroup_id, entry)
 
     def release_cgroup(self, target: str | int) -> bool:
         """Release a cgroup v2 hierarchy from quarantine."""
         cgroup_id = resolve_cgroup_id(target)
 
-        def _do_release() -> bool:
-            return self._bpf_cgroup_delete_elem(cgroup_id)
+        if self.mock_mode:
 
-        return self._with_cgroup_lock(_do_release)
+            def _do_release() -> bool:
+                return self._bpf_cgroup_delete_elem(cgroup_id)
+
+            return self._with_cgroup_lock(_do_release)
+
+        if self._bpf_cgroup_fd < 0 and os.path.exists(self.cgroup_map_path):
+            self._open_bpf_cgroup_map()
+        return self._bpf_cgroup_delete_elem(cgroup_id)
 
     def is_cgroup_quarantined(self, target: str | int) -> bool:
         """Check if a cgroup v2 hierarchy is actively quarantined."""
         cgroup_id = resolve_cgroup_id(target)
 
-        def _do_check() -> bool:
-            if (
-                self._bpf_cgroup_fd < 0
-                and not self.mock_mode
-                and os.path.exists(self.cgroup_map_path)
-            ):
-                self._open_bpf_cgroup_map()
-            entry = self._bpf_cgroup_lookup_elem(cgroup_id)
-            if entry is None:
-                return False
-            return not is_entry_expired(entry)
+        if self.mock_mode:
 
-        return self._with_cgroup_lock(_do_check)
+            def _do_check() -> bool:
+                entry = self._bpf_cgroup_lookup_elem(cgroup_id)
+                if entry is None:
+                    return False
+                return not is_entry_expired(entry)
+
+            return self._with_cgroup_lock(_do_check)
+
+        if self._bpf_cgroup_fd < 0 and os.path.exists(self.cgroup_map_path):
+            self._open_bpf_cgroup_map()
+        entry = self._bpf_cgroup_lookup_elem(cgroup_id)
+        if entry is None:
+            return False
+        return not is_entry_expired(entry)
 
     def get_cgroup_entry(self, target: str | int) -> MorayQuarantineEntry | None:
         """Retrieve raw quarantine entry for a cgroup."""
         cgroup_id = resolve_cgroup_id(target)
 
-        def _do_get() -> MorayQuarantineEntry | None:
-            if (
-                self._bpf_cgroup_fd < 0
-                and not self.mock_mode
-                and os.path.exists(self.cgroup_map_path)
-            ):
-                self._open_bpf_cgroup_map()
-            return self._bpf_cgroup_lookup_elem(cgroup_id)
+        if self.mock_mode:
 
-        return self._with_cgroup_lock(_do_get)
+            def _do_get() -> MorayQuarantineEntry | None:
+                return self._bpf_cgroup_lookup_elem(cgroup_id)
+
+            return self._with_cgroup_lock(_do_get)
+
+        if self._bpf_cgroup_fd < 0 and os.path.exists(self.cgroup_map_path):
+            self._open_bpf_cgroup_map()
+        return self._bpf_cgroup_lookup_elem(cgroup_id)
 
     def get_cgroup_status(self, target: str | int) -> dict[str, object]:
         """Query structured quarantine status for a cgroup."""
@@ -1664,19 +1685,19 @@ class MorayHook:
         self, include_expired: bool = False
     ) -> list[tuple[int, MorayQuarantineEntry]]:
         """List all quarantined cgroup entries."""
+        if not self.mock_mode:
+            return []
 
         def _do_list() -> list[tuple[int, MorayQuarantineEntry]]:
-            if self.mock_mode:
-                self._load_mock_cgroup_file()
-                if include_expired:
-                    return list(self._mock_cgroup_table.items())
-                now_ns = time.time_ns()
-                return [
-                    (cid, entry)
-                    for cid, entry in self._mock_cgroup_table.items()
-                    if not is_entry_expired(entry, now_ns)
-                ]
-            return []
+            self._load_mock_cgroup_file()
+            if include_expired:
+                return list(self._mock_cgroup_table.items())
+            now_ns = time.time_ns()
+            return [
+                (cid, entry)
+                for cid, entry in self._mock_cgroup_table.items()
+                if not is_entry_expired(entry, now_ns)
+            ]
 
         return self._with_cgroup_lock(_do_list)
 
@@ -1687,14 +1708,15 @@ class MorayHook:
                 "Cgroup flush requires explicit confirmation (force=True / --force)."
             )
 
-        def _do_flush() -> int:
-            if self.mock_mode:
-                self._load_mock_cgroup_file()
-                count = len(self._mock_cgroup_table)
-                self._mock_cgroup_table.clear()
-                self._sync_mock_cgroup_file()
-                return count
+        if not self.mock_mode:
             return 0
+
+        def _do_flush() -> int:
+            self._load_mock_cgroup_file()
+            count = len(self._mock_cgroup_table)
+            self._mock_cgroup_table.clear()
+            self._sync_mock_cgroup_file()
+            return count
 
         return self._with_cgroup_lock(_do_flush)
 

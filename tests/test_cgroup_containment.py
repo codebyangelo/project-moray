@@ -230,6 +230,26 @@ class TestCgroupAdversarialAndBoundaries:
         assert health["cgroup_map_path"] == str(mock_cgroup)
         assert health["cgroup_quarantined_count"] == 1
 
+    def test_cgroup_lock_skipped_on_bpffs_path(self, tmp_path: Path) -> None:
+        """Verify that _with_cgroup_lock skips file locking on bpffs or in live mode."""
+        mock_cgroup = tmp_path / "test_cgroup.bin"
+        hook = MorayHook(cgroup_map_path=str(mock_cgroup), mock_mode=True)
+        hook._with_cgroup_lock(lambda: 1)
+        assert os.path.exists(f"{mock_cgroup}.lock")
+
+        # Set path to bpffs path; should bypass file lock without EPERM
+        hook.cgroup_map_path = "/sys/fs/bpf/moray/cgroup_map"
+        res = hook._with_cgroup_lock(lambda: 42)
+        assert res == 42
+        assert not os.path.exists("/sys/fs/bpf/moray/cgroup_map.lock")
+
+        # Set mock_mode=False; should bypass file lock completely
+        hook.cgroup_map_path = str(tmp_path / "never_locked.bin")
+        hook.mock_mode = False
+        res2 = hook._with_cgroup_lock(lambda: 99)
+        assert res2 == 99
+        assert not os.path.exists(f"{tmp_path}/never_locked.bin.lock")
+
 
 class TestCgroupCliVerbs:
     """Verifies userspace bridge CLI commands for cgroup management."""
