@@ -8,7 +8,7 @@
 [![Tests: 82 Passed](https://img.shields.io/badge/Tests-82%20Passed-brightgreen.svg)](#-building--running)
 [![Contract: Fail-Closed](https://img.shields.io/badge/Contract-Fail--Closed-red.svg)](docs/INVARIANTS.md)
 
-Project Moray (`morayd`) is an ultra-lightweight, zero-dependency in-kernel containment daemon and eBPF security subsystem. Operating in Ring 0 via BPF-LSM and XDP, Moray sits beneath user-space agent frameworks to terminate compromised processes, sever unauthorized network sockets, and drop malicious frames at the driver boundary before user-space context switches complete.
+Project Moray (`morayd`) is an ultra-lightweight, zero-dependency in-kernel containment daemon and eBPF security subsystem. Operating in Ring 0 via BPF-LSM with XDP packet-dropping capabilities, Moray sits beneath user-space agent frameworks to terminate compromised processes, sever unauthorized network sockets, and isolate malicious workloads before user-space context switches complete.
 
 ---
 
@@ -28,7 +28,7 @@ graph LR
         M -->|Instant Lookup| LSM[BPF-LSM Hooks]
         LSM -->|bprm_check_security| S1[Block execve -> -EPERM]
         LSM -->|socket_connect| S2[Sever Socket -> -EPERM]
-        XDP[XDP Driver Hook] -->|Match Wire Drops| S3[XDP_DROP Packet]
+        XDP["XDP Driver Hook (Phase 6.4)"] -->|Match Wire Drops| S3[XDP_DROP Packet]
     end
 ```
 
