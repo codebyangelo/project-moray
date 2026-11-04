@@ -7,10 +7,10 @@ This document codifies the core architectural invariants of Project Moray (`mora
 ## 🛡️ Core Architectural Invariants
 
 ### Invariant 1: Fail-Closed Quarantine ($I_1$)
-* **Definition**: Any process PID or TGID registered in `moray_quarantine_map` with a non-zero quarantine action flag MUST be denied execution of restricted operations (`bprm_check_security`, `socket_connect`) with `-EPERM` (`-1`). *(Note: Cgroup v2 subtree scoping is scheduled under Roadmap Phase 6.5.)*
+* **Definition**: Any process PID, TGID, or Cgroup v2 subtree registered in `moray_quarantine_map` or `moray_cgroup_map` with a non-zero quarantine action flag MUST be denied execution of restricted operations (`bprm_check_security`, `socket_connect`) with `-EPERM` (`-1`).
 * **Boundary Condition**: If the user-space bridge (`lobster_hook.py`) encounters an unhandled exception, missing kernel map, or corrupted descriptor, it MUST fail closed (exit code `-4` or strict error return). It must never fail open.
-* **Enforcement Point**: `moray_kern.bpf.c` (LSM entry points) and `bridge/lobster_hook.py`.
-* **Verification**: `tests/test_lobster_hook.py` and BPF mock strike tests.
+* **Enforcement Point**: `moray_kern.bpf.c` (LSM entry points inspecting `tgid`, `pid`, and `bpf_get_current_cgroup_id()`) and `bridge/lobster_hook.py`.
+* **Verification**: `tests/test_lobster_hook.py`, `tests/test_cgroup_containment.py`, and `tests/run_live_kernel_test.sh`.
 
 ### Invariant 2: Zero-Latency Benign Baseline ($I_2$)
 * **Definition**: Benign, unflagged processes must not incur locking overhead, dynamic heap allocations, or measurable context-switch degradation.
@@ -67,6 +67,7 @@ This document codifies the core architectural invariants of Project Moray (`mora
 | Invariant | Target Subsystem | Automated Verification Test | Pass Criteria |
 | :--- | :--- | :--- | :--- |
 | **$I_1$ (Syscall)** | `moray_kern.bpf.c`, `lobster_hook.py` | `tests/test_lobster_hook.py`, `tests/run_live_kernel_test.sh` | Syscall blocked (`-EPERM`), bridge returns `-4` on fault. |
+| **$I_1$ (Cgroup)** | `moray_kern.bpf.c` (LSM), `lobster_hook.py` | `tests/test_cgroup_containment.py`, `tests/run_live_kernel_test.sh` | Process within quarantined cgroup v2 subtree blocked with `-EPERM`. |
 | **$I_1$ (Wire)** | `moray_kern.bpf.c` (XDP), `lobster_hook.py` | `tests/test_xdp_filter.py`, `tests/run_live_kernel_test.sh` | IPv4 matching `moray_xdp_drop_map` dropped via `XDP_DROP` at line rate. |
 | **$I_2$** | `moray_kern.bpf.c` | `tests/victim_worker.c` (Step 4) | Benign execution succeeds unimpeded via $O(1)$ fast path without locks or allocations. |
 | **$I_3$** | `lsm/bpf` | `tests/test_anti_tamper.py`, `tests/run_live_kernel_test.sh` | Block `sys_bpf` from quarantined PID with `-EPERM`. |

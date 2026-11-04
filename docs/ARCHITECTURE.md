@@ -41,7 +41,7 @@ graph TD
 | **The Crevice (Anti-Tamper)** | `lsm/bpf` (`moray_bpf_strike`) | Intercepts the `bpf()` syscall from quarantined targets to block probe enumeration, map modification, and hook detachment with `-EPERM`. |
 | **Sensory Pores (Lateral Line)** | `tracepoint` / `BPF_MAP_TYPE_RINGBUF` | Passively records execution traces, file opens, and socket allocations into a bounded ring buffer without adding lock contention. |
 | **The Outer Jaw (First Contact)** | Project Lobster (Layer 7) | Evaluates prompt injection, unauthorized MCP tool calls, and payload escapes in user space, writing violating PIDs into `quarantine_map`. |
-| **The Pharyngeal Jaw (The Strike)** | BPF-LSM (`-EPERM`) + `XDP_DROP` | Fires inside Ring 0 before context switches complete, returning `-EPERM` to `execve`, `socket_connect`, and `bpf` syscalls, and dropping quarantined wire packets via driver-level `XDP_DROP`. |
+| **The Pharyngeal Jaw (The Strike)** | BPF-LSM (`-EPERM`) + `XDP_DROP` | Fires inside Ring 0 before context switches complete, returning `-EPERM` to `execve`, `socket_connect`, and `bpf` syscalls across PIDs, TGIDs, and Cgroup v2 hierarchies, and dropping quarantined wire packets via driver-level `XDP_DROP`. |
 
 ---
 

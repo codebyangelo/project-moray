@@ -35,6 +35,7 @@ Moray is engineered specifically to defend against the following threat vectors:
 | **THREAT-06** | Concurrency Race Exploitation | Rapid multi-threaded strikes/releases aiming to interleave map writes and drop quarantine records. | Serialized POSIX file locking (`fcntl.flock(LOCK_EX)`) combined with atomic filesystem rename (`os.replace`). |
 | **THREAT-07** | Type Confusion Hijack | Passing Python booleans (`True == 1`) to trick the quarantine hook into disabling kernel PID 1 (`init`). | Strict `validate_pid()` rejecting non-integers, explicit `bool` instances, and range-bounding `[2, 4194304]`. |
 | **THREAT-08** | Symlink Traversal Hijacking | Pointing quarantine map paths to sensitive system files (`/etc/shadow`) to corrupt host state. | `O_NOFOLLOW` enforcement and explicit rejection of symbolic link targets. |
+| **THREAT-09** | Short-Lived Fork / Subtree Evasion | Quarantined agent forks ephemeral child workers before userspace can register child PIDs. | Cgroup v2 scoping (`bpf_get_current_cgroup_id()`) intercepts syscalls across all processes within the quarantined cgroup hierarchy. |
 
 ---
 

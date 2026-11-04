@@ -157,6 +157,29 @@ static int init_mock_xdp(const char *path) {
     return 0;
 }
 
+/*
+ * Create and initialize the mock cgroup map in mock mode
+ */
+static int init_mock_cgroup(const char *path) {
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+        fprintf(stderr, "[-] Failed to open mock cgroup file '%s': %s\n", path, strerror(errno));
+        return -1;
+    }
+
+    /* Pre-allocate empty map table space for MORAY_MAX_ENTRIES (key: __u64, value: struct moray_quarantine_entry) */
+    size_t table_size = MORAY_MAX_ENTRIES * (sizeof(__u64) + sizeof(struct moray_quarantine_entry));
+    if (ftruncate(fd, (off_t)table_size) != 0) {
+        fprintf(stderr, "[-] Failed to preallocate mock cgroup table: %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    fprintf(stdout, "[+] Mock cgroup_map initialized at: %s (%zu bytes)\n", path, table_size);
+    close(fd);
+    return 0;
+}
+
 /* Live BPF Runtime Context */
 struct moray_bpf_context {
     struct bpf_object *obj;
@@ -167,6 +190,7 @@ struct moray_bpf_context {
     struct bpf_map *map_quarantine;
     struct bpf_map *map_events;
     struct bpf_map *map_xdp_drop;
+    struct bpf_map *map_cgroup;
     char iface[IF_NAMESIZE];
     int xdp_ifindex;
 };
@@ -175,9 +199,11 @@ static int load_and_attach_bpf(const char *bpf_obj_path, const char *pin_dir, st
     char q_pin[256];
     char e_pin[256];
     char x_pin[256];
+    char c_pin[256];
     snprintf(q_pin, sizeof(q_pin), "%s/quarantine_map", pin_dir);
     snprintf(e_pin, sizeof(e_pin), "%s/events", pin_dir);
     snprintf(x_pin, sizeof(x_pin), "%s/xdp_drop_map", pin_dir);
+    snprintf(c_pin, sizeof(c_pin), "%s/cgroup_map", pin_dir);
 
     fprintf(stdout, "[*] Loading Ring 0 BPF object from: %s\n", bpf_obj_path);
     ctx->obj = bpf_object__open_file(bpf_obj_path, NULL);
@@ -276,6 +302,18 @@ static int load_and_attach_bpf(const char *bpf_obj_path, const char *pin_dir, st
         }
     }
 
+    /* Pin cgroup map */
+    ctx->map_cgroup = bpf_object__find_map_by_name(ctx->obj, "moray_cgroup_map");
+    if (ctx->map_cgroup) {
+        unlink(c_pin);
+        err = bpf_map__pin(ctx->map_cgroup, c_pin);
+        if (err) {
+            fprintf(stderr, "[-] Warning: Failed to pin cgroup_map to '%s': %s\n", c_pin, strerror(-err));
+        } else {
+            fprintf(stdout, "[+] Pinned cgroup_map to: %s\n", c_pin);
+        }
+    }
+
     return 0;
 }
 
@@ -294,12 +332,15 @@ static void cleanup_bpf(struct moray_bpf_context *ctx, const char *pin_dir) {
         char q_pin[256];
         char e_pin[256];
         char x_pin[256];
+        char c_pin[256];
         snprintf(q_pin, sizeof(q_pin), "%s/quarantine_map", pin_dir);
         snprintf(e_pin, sizeof(e_pin), "%s/events", pin_dir);
         snprintf(x_pin, sizeof(x_pin), "%s/xdp_drop_map", pin_dir);
+        snprintf(c_pin, sizeof(c_pin), "%s/cgroup_map", pin_dir);
         unlink(q_pin);
         unlink(e_pin);
         unlink(x_pin);
+        unlink(c_pin);
     }
 }
 
@@ -314,6 +355,7 @@ int main(int argc, char **argv) {
     char quarantine_path[256];
     char events_path[256];
     char xdp_path[256];
+    char cgroup_path[256];
     struct moray_bpf_context bpf_ctx;
     memset(&bpf_ctx, 0, sizeof(bpf_ctx));
 
@@ -375,9 +417,11 @@ int main(int argc, char **argv) {
     int q_len = snprintf(quarantine_path, sizeof(quarantine_path), "%s/quarantine_map", pin_dir);
     int e_len = snprintf(events_path, sizeof(events_path), "%s/events", pin_dir);
     int x_len = snprintf(xdp_path, sizeof(xdp_path), "%s/xdp_drop_map", pin_dir);
+    int c_len = snprintf(cgroup_path, sizeof(cgroup_path), "%s/cgroup_map", pin_dir);
     if (q_len < 0 || (size_t)q_len >= sizeof(quarantine_path) ||
         e_len < 0 || (size_t)e_len >= sizeof(events_path) ||
-        x_len < 0 || (size_t)x_len >= sizeof(xdp_path)) {
+        x_len < 0 || (size_t)x_len >= sizeof(xdp_path) ||
+        c_len < 0 || (size_t)c_len >= sizeof(cgroup_path)) {
         fprintf(stderr, "[-] Target pin directory path exceeds buffer limit (%zu bytes)\n", sizeof(quarantine_path));
         return 1;
     }
@@ -392,7 +436,9 @@ int main(int argc, char **argv) {
 
     if (mock_mode) {
         fprintf(stdout, "[*] Running in mock containment test mode...\n");
-        if (init_mock_quarantine(quarantine_path) != 0 || init_mock_xdp(xdp_path) != 0) {
+        if (init_mock_quarantine(quarantine_path) != 0 ||
+            init_mock_xdp(xdp_path) != 0 ||
+            init_mock_cgroup(cgroup_path) != 0) {
             return 1;
         }
     } else {

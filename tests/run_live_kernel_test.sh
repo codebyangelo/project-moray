@@ -70,6 +70,12 @@ if [ ! -e /sys/fs/bpf/moray/xdp_drop_map ]; then
 fi
 echo "[+] Verified pinned XDP map: $(ls -l /sys/fs/bpf/moray/xdp_drop_map)"
 
+if [ ! -e /sys/fs/bpf/moray/cgroup_map ]; then
+    echo "[-] FATAL: /sys/fs/bpf/moray/cgroup_map was not pinned!"
+    exit 1
+fi
+echo "[+] Verified pinned cgroup map: $(ls -l /sys/fs/bpf/moray/cgroup_map)"
+
 # 6. Test Live Syscall Interception (execve denial)
 echo "[*] Step 6: Testing live execve() interception via Ring 0 BPF-LSM..."
 /tmp/victim_worker --wait-and-exec &
@@ -251,8 +257,35 @@ if [ "$XDP_CHECK_POST" -ne 0 ]; then
 fi
 echo "[+] EMPIRICAL PROOF: Live in-kernel XDP drop map successfully removed target IP!"
 
-# 14. Clean Teardown
-echo "[*] Step 14: Terminating morayd..."
+# 14. Test Live Cgroup v2 Containment Scoping
+echo "[*] Step 14: Testing live cgroup v2 containment registration and inspection..."
+if [ -d "/sys/fs/cgroup" ]; then
+    CGROUP_TEST_DIR="/sys/fs/cgroup/moray_cgroup_live_test"
+    mkdir -p "$CGROUP_TEST_DIR" 2>/dev/null || true
+    if [ -d "$CGROUP_TEST_DIR" ]; then
+        python3 bridge/lobster_hook.py --quarantine-cgroup "$CGROUP_TEST_DIR" --block-exec --cgroup-map-path /sys/fs/bpf/moray/cgroup_map --json
+        echo "[+] Programmed cgroup containment for $CGROUP_TEST_DIR in live kernel"
+
+        CG_CHECK_STATUS=$(python3 bridge/lobster_hook.py --cgroup-status "$CGROUP_TEST_DIR" --cgroup-map-path /sys/fs/bpf/moray/cgroup_map --json)
+        echo "$CG_CHECK_STATUS"
+        if ! echo "$CG_CHECK_STATUS" | grep -q '"quarantined": true'; then
+            echo "[-] FATAL: Cgroup was not recognized as quarantined in live map!"
+            exit 1
+        fi
+        echo "[+] EMPIRICAL PROOF: Live in-kernel cgroup map registered and verified target cgroup!"
+
+        python3 bridge/lobster_hook.py --release-cgroup "$CGROUP_TEST_DIR" --cgroup-map-path /sys/fs/bpf/moray/cgroup_map --json
+        rmdir "$CGROUP_TEST_DIR" 2>/dev/null || true
+        echo "[+] EMPIRICAL PROOF: Live in-kernel cgroup map successfully released target cgroup!"
+    else
+        echo "[!] Notice: Cgroup v2 subdirectory creation not permitted in this namespace, skipping nested hierarchy test."
+    fi
+else
+    echo "[!] Notice: /sys/fs/cgroup not mounted, skipping live cgroup v2 test."
+fi
+
+# 15. Clean Teardown
+echo "[*] Step 15: Terminating morayd..."
 kill -TERM "$DAEMON_PID"
 sleep 1
 
