@@ -66,7 +66,8 @@ This document codifies the core architectural invariants of Project Moray (`mora
 
 | Invariant | Target Subsystem | Automated Verification Test | Pass Criteria |
 | :--- | :--- | :--- | :--- |
-| **$I_1$** | `moray_kern.bpf.c`, `lobster_hook.py` | `tests/test_lobster_hook.py`, `tests/run_live_kernel_test.sh` | Syscall blocked (`-EPERM`), bridge returns `-4` on fault. |
+| **$I_1$ (Syscall)** | `moray_kern.bpf.c`, `lobster_hook.py` | `tests/test_lobster_hook.py`, `tests/run_live_kernel_test.sh` | Syscall blocked (`-EPERM`), bridge returns `-4` on fault. |
+| **$I_1$ (Wire)** | `moray_kern.bpf.c` (XDP), `lobster_hook.py` | `tests/test_xdp_filter.py`, `tests/run_live_kernel_test.sh` | IPv4 matching `moray_xdp_drop_map` dropped via `XDP_DROP` at line rate. |
 | **$I_2$** | `moray_kern.bpf.c` | `tests/victim_worker.c` (Step 4) | Benign execution succeeds unimpeded via $O(1)$ fast path without locks or allocations. |
 | **$I_3$** | `lsm/bpf` | `tests/test_anti_tamper.py`, `tests/run_live_kernel_test.sh` | Block `sys_bpf` from quarantined PID with `-EPERM`. |
 | **$I_4$** | `src/moray.h`, `tests/` | `tests/test_struct_layout.c`, `tests/test_adversarial.py` | Static assertions `sizeof(struct moray_event) == 128` and 64KB heap ceiling clamp. |

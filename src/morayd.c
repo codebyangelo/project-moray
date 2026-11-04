@@ -18,6 +18,7 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/vfs.h>
+#include <net/if.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "moray.h"
@@ -133,21 +134,50 @@ static int init_mock_quarantine(const char *path) {
     return 0;
 }
 
+/*
+ * Create and initialize the mock XDP drop map in mock mode
+ */
+static int init_mock_xdp(const char *path) {
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+        fprintf(stderr, "[-] Failed to open mock xdp file '%s': %s\n", path, strerror(errno));
+        return -1;
+    }
+
+    /* Pre-allocate empty map table space for MORAY_MAX_ENTRIES (key: __u32, value: __u8) */
+    size_t table_size = MORAY_MAX_ENTRIES * (sizeof(__u32) + sizeof(__u8));
+    if (ftruncate(fd, (off_t)table_size) != 0) {
+        fprintf(stderr, "[-] Failed to preallocate mock xdp table: %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    fprintf(stdout, "[+] Mock xdp_drop_map initialized at: %s (%zu bytes)\n", path, table_size);
+    close(fd);
+    return 0;
+}
+
 /* Live BPF Runtime Context */
 struct moray_bpf_context {
     struct bpf_object *obj;
     struct bpf_link *link_bprm;
     struct bpf_link *link_socket;
     struct bpf_link *link_bpf;
+    struct bpf_link *link_xdp;
     struct bpf_map *map_quarantine;
     struct bpf_map *map_events;
+    struct bpf_map *map_xdp_drop;
+    char iface[IF_NAMESIZE];
+    int xdp_ifindex;
 };
 
 static int load_and_attach_bpf(const char *bpf_obj_path, const char *pin_dir, struct moray_bpf_context *ctx) {
     char q_pin[256];
     char e_pin[256];
+    char x_pin[256];
     snprintf(q_pin, sizeof(q_pin), "%s/quarantine_map", pin_dir);
     snprintf(e_pin, sizeof(e_pin), "%s/events", pin_dir);
+    snprintf(x_pin, sizeof(x_pin), "%s/xdp_drop_map", pin_dir);
 
     fprintf(stdout, "[*] Loading Ring 0 BPF object from: %s\n", bpf_obj_path);
     ctx->obj = bpf_object__open_file(bpf_obj_path, NULL);
@@ -196,6 +226,20 @@ static int load_and_attach_bpf(const char *bpf_obj_path, const char *pin_dir, st
         }
     }
 
+    /* Attach XDP filter if interface was configured */
+    if (ctx->xdp_ifindex > 0) {
+        struct bpf_program *prog_xdp = bpf_object__find_program_by_name(ctx->obj, "moray_xdp_filter");
+        if (prog_xdp) {
+            ctx->link_xdp = bpf_program__attach_xdp(prog_xdp, ctx->xdp_ifindex);
+            if (!ctx->link_xdp) {
+                fprintf(stderr, "[-] Warning: Failed to attach moray_xdp_filter to interface '%s' (ifindex %d): %s\n",
+                        ctx->iface, ctx->xdp_ifindex, strerror(errno));
+            } else {
+                fprintf(stdout, "[+] Attached XDP filter to interface '%s' (ifindex %d)\n", ctx->iface, ctx->xdp_ifindex);
+            }
+        }
+    }
+
     /* Pin quarantine map */
     ctx->map_quarantine = bpf_object__find_map_by_name(ctx->obj, "moray_quarantine_map");
     if (ctx->map_quarantine) {
@@ -220,6 +264,18 @@ static int load_and_attach_bpf(const char *bpf_obj_path, const char *pin_dir, st
         }
     }
 
+    /* Pin xdp drop map */
+    ctx->map_xdp_drop = bpf_object__find_map_by_name(ctx->obj, "moray_xdp_drop_map");
+    if (ctx->map_xdp_drop) {
+        unlink(x_pin);
+        err = bpf_map__pin(ctx->map_xdp_drop, x_pin);
+        if (err) {
+            fprintf(stderr, "[-] Warning: Failed to pin xdp_drop_map to '%s': %s\n", x_pin, strerror(-err));
+        } else {
+            fprintf(stdout, "[+] Pinned xdp_drop_map to: %s\n", x_pin);
+        }
+    }
+
     return 0;
 }
 
@@ -228,15 +284,22 @@ static void cleanup_bpf(struct moray_bpf_context *ctx, const char *pin_dir) {
     if (ctx->link_bprm) bpf_link__destroy(ctx->link_bprm);
     if (ctx->link_socket) bpf_link__destroy(ctx->link_socket);
     if (ctx->link_bpf) bpf_link__destroy(ctx->link_bpf);
+    if (ctx->link_xdp) {
+        bpf_link__destroy(ctx->link_xdp);
+        fprintf(stdout, "[+] Detached XDP filter from interface '%s'\n", ctx->iface);
+    }
     if (ctx->obj) bpf_object__close(ctx->obj);
 
     if (pin_dir) {
         char q_pin[256];
         char e_pin[256];
+        char x_pin[256];
         snprintf(q_pin, sizeof(q_pin), "%s/quarantine_map", pin_dir);
         snprintf(e_pin, sizeof(e_pin), "%s/events", pin_dir);
+        snprintf(x_pin, sizeof(x_pin), "%s/xdp_drop_map", pin_dir);
         unlink(q_pin);
         unlink(e_pin);
+        unlink(x_pin);
     }
 }
 
@@ -250,6 +313,7 @@ int main(int argc, char **argv) {
     const char *bpf_obj_path = "build/moray_kern.bpf.o";
     char quarantine_path[256];
     char events_path[256];
+    char xdp_path[256];
     struct moray_bpf_context bpf_ctx;
     memset(&bpf_ctx, 0, sizeof(bpf_ctx));
 
@@ -261,6 +325,7 @@ int main(int argc, char **argv) {
             fprintf(stdout, "  --preflight      Execute live kernel preflight checks and exit\n");
             fprintf(stdout, "  --pin-dir <dir>  Override default BPF pin directory (default: %s)\n", MORAY_PIN_DIR);
             fprintf(stdout, "  --bpf-obj <path> Path to compiled BPF object (default: build/moray_kern.bpf.o)\n");
+            fprintf(stdout, "  --iface <dev>    Attach XDP wire filter to network interface (e.g. eth0, lo)\n");
             fprintf(stdout, "  --help           Show this help message\n");
             return 0;
         } else if (strcmp(argv[i], "--preflight") == 0) {
@@ -277,10 +342,25 @@ int main(int argc, char **argv) {
             pin_dir = argv[++i];
         } else if (strcmp(argv[i], "--bpf-obj") == 0 && i + 1 < argc) {
             bpf_obj_path = argv[++i];
+        } else if ((strcmp(argv[i], "--iface") == 0 || strcmp(argv[i], "-i") == 0) && i + 1 < argc) {
+            const char *dev = argv[++i];
+            strncpy(bpf_ctx.iface, dev, sizeof(bpf_ctx.iface) - 1);
+            bpf_ctx.iface[sizeof(bpf_ctx.iface) - 1] = '\0';
         }
     }
 
     print_banner();
+
+    /* Resolve network interface index for XDP if configured */
+    if (bpf_ctx.iface[0] != '\0') {
+        bpf_ctx.xdp_ifindex = if_nametoindex(bpf_ctx.iface);
+        if (bpf_ctx.xdp_ifindex == 0 && !mock_mode) {
+            fprintf(stderr, "[-] FATAL (INVALID_INTERFACE): Network interface '%s' does not exist: %s\n",
+                    bpf_ctx.iface, strerror(errno));
+            return 1;
+        }
+        fprintf(stdout, "[*] Target XDP network interface: %s (ifindex: %d)\n", bpf_ctx.iface, bpf_ctx.xdp_ifindex);
+    }
 
     /* Register signal handlers for graceful teardown */
     struct sigaction sa;
@@ -294,8 +374,10 @@ int main(int argc, char **argv) {
 
     int q_len = snprintf(quarantine_path, sizeof(quarantine_path), "%s/quarantine_map", pin_dir);
     int e_len = snprintf(events_path, sizeof(events_path), "%s/events", pin_dir);
+    int x_len = snprintf(xdp_path, sizeof(xdp_path), "%s/xdp_drop_map", pin_dir);
     if (q_len < 0 || (size_t)q_len >= sizeof(quarantine_path) ||
-        e_len < 0 || (size_t)e_len >= sizeof(events_path)) {
+        e_len < 0 || (size_t)e_len >= sizeof(events_path) ||
+        x_len < 0 || (size_t)x_len >= sizeof(xdp_path)) {
         fprintf(stderr, "[-] Target pin directory path exceeds buffer limit (%zu bytes)\n", sizeof(quarantine_path));
         return 1;
     }
@@ -310,7 +392,7 @@ int main(int argc, char **argv) {
 
     if (mock_mode) {
         fprintf(stdout, "[*] Running in mock containment test mode...\n");
-        if (init_mock_quarantine(quarantine_path) != 0) {
+        if (init_mock_quarantine(quarantine_path) != 0 || init_mock_xdp(xdp_path) != 0) {
             return 1;
         }
     } else {
