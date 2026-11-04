@@ -298,6 +298,52 @@ When containing an agent attempting network exfiltration, raw socket bypasses, o
    python3 bridge/lobster_hook.py --xdp-flush --force
    ```
 
+### IR-07: Cgroup v2 Containment Scoping & Subtree Sandboxing
+When containing a multi-threaded agent worker pool, runner hierarchy, or short-lived forked processes before child PIDs can be registered individually:
+
+1. **Assert Quarantine on Cgroup v2 Hierarchy**:
+   ```bash
+   python3 bridge/lobster_hook.py --quarantine-cgroup /sys/fs/cgroup/agent-sandbox --block-wan --json
+   # Or by 64-bit cgroup inode:
+   python3 bridge/lobster_hook.py --quarantine-cgroup 1048576 --block-exec --json
+   ```
+
+2. **Query Cgroup Containment Status**:
+   ```bash
+   python3 bridge/lobster_hook.py --cgroup-status /sys/fs/cgroup/agent-sandbox --json
+   ```
+   **Output Inspection**:
+   ```json
+   {
+     "cgroup_id": 1048576,
+     "state": "ACTIVE",
+     "state_code": 1,
+     "quarantined": true,
+     "action_flags": 18,
+     "allow_loopback": true,
+     "strike_count": 1,
+     "ttl_seconds": 0,
+     "remaining_seconds": 0,
+     "reason": 1,
+     "timestamp_ns": 1730736000000000000
+   }
+   ```
+
+3. **List All Quarantined Cgroups**:
+   ```bash
+   python3 bridge/lobster_hook.py --list-cgroups --json
+   ```
+
+4. **Release Cgroup Hierarchy**:
+   ```bash
+   python3 bridge/lobster_hook.py --release-cgroup /sys/fs/cgroup/agent-sandbox --json
+   ```
+
+5. **Emergency Purge of All Quarantined Cgroups**:
+   ```bash
+   python3 bridge/lobster_hook.py --flush-cgroups --force
+   ```
+
 ---
 
 ## 5. Disaster Recovery & Break-Glass Procedures
@@ -316,7 +362,7 @@ python3 /usr/local/bin/lobster-hook --flush-all --force --json
 *Note:* The `--force` flag is mandatory. Running `--flush-all` without `--force` immediately fails closed with exit code `252`.
 
 ### DR-02: Corrupted Map State Recovery
-If `/sys/fs/bpf/moray/quarantine_map` or `/sys/fs/bpf/moray/xdp_drop_map` becomes corrupted due to abnormal hypervisor termination or filesystem failure:
+If `/sys/fs/bpf/moray/quarantine_map`, `/sys/fs/bpf/moray/xdp_drop_map`, or `/sys/fs/bpf/moray/cgroup_map` becomes corrupted due to abnormal hypervisor termination or filesystem failure:
 
 1. **Stop the Daemon**:
    ```bash
@@ -328,6 +374,7 @@ If `/sys/fs/bpf/moray/quarantine_map` or `/sys/fs/bpf/moray/xdp_drop_map` become
    rm -f /sys/fs/bpf/moray/quarantine_map
    rm -f /sys/fs/bpf/moray/events
    rm -f /sys/fs/bpf/moray/xdp_drop_map
+   rm -f /sys/fs/bpf/moray/cgroup_map
    ```
 
 3. **Restart the Daemon**:

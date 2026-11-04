@@ -91,6 +91,7 @@ ____##name(unsigned long long *ctx, ##args)
 #define BPF_FUNC_get_current_pid_tgid 14
 #define BPF_FUNC_get_current_uid_gid 15
 #define BPF_FUNC_get_current_comm    16
+#define BPF_FUNC_get_current_cgroup_id 80
 #define BPF_FUNC_send_signal         109
 #define BPF_FUNC_probe_read_kernel   113
 #define BPF_FUNC_ringbuf_output      130
@@ -104,6 +105,7 @@ static long (*bpf_trace_printk)(const char *fmt, __u32 fmt_size, ...) = (void *)
 static __u64 (*bpf_get_current_pid_tgid)(void) = (void *)BPF_FUNC_get_current_pid_tgid;
 static __u64 (*bpf_get_current_uid_gid)(void) = (void *)BPF_FUNC_get_current_uid_gid;
 static long (*bpf_get_current_comm)(void *buf, __u32 size_of_buf) = (void *)BPF_FUNC_get_current_comm;
+static __u64 (*bpf_get_current_cgroup_id)(void) = (void *)BPF_FUNC_get_current_cgroup_id;
 static long (*bpf_send_signal)(__u32 sig) = (void *)BPF_FUNC_send_signal;
 static long (*bpf_probe_read_kernel)(void *dst, __u32 size, const void *unsafe_ptr) = (void *)BPF_FUNC_probe_read_kernel;
 static long (*bpf_ringbuf_output)(void *ringbuf, void *data, __u64 size, __u64 flags) = (void *)BPF_FUNC_ringbuf_output;

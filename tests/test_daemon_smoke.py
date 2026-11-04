@@ -64,6 +64,10 @@ class TestDaemonSmokeLifecycle:
             assert xdp_map.exists(), "xdp_drop_map was not pinned"
             assert xdp_map.stat().st_size > 0, "xdp_drop_map was not preallocated"
 
+            cgroup_map = mock_pin_dir / "cgroup_map"
+            assert cgroup_map.exists(), "cgroup_map was not pinned"
+            assert cgroup_map.stat().st_size > 0, "cgroup_map was not preallocated"
+
             # Deliver SIGTERM for graceful shutdown
             proc.send_signal(signal.SIGTERM)
             stdout, _ = proc.communicate(timeout=3)

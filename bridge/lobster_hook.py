@@ -14,6 +14,7 @@ import fcntl
 import json
 import os
 import socket
+import stat
 import struct
 import sys
 import threading
@@ -59,9 +60,11 @@ DEFAULT_PIN_DIR: str = "/sys/fs/bpf/moray"
 DEFAULT_QUARANTINE_PIN: str = "/sys/fs/bpf/moray/quarantine_map"
 DEFAULT_EVENTS_PIN: str = "/sys/fs/bpf/moray/events"
 DEFAULT_XDP_PIN: str = "/sys/fs/bpf/moray/xdp_drop_map"
+DEFAULT_CGROUP_PIN: str = "/sys/fs/bpf/moray/cgroup_map"
 DEFAULT_MOCK_QUARANTINE_FILE: str = "/tmp/moray_quarantine_mock.bin"
 DEFAULT_MOCK_XDP_FILE: str = "/tmp/moray_xdp_mock.bin"
 DEFAULT_MOCK_EVENTS_FILE: str = "/tmp/moray_events_mock.jsonl"
+DEFAULT_MOCK_CGROUP_FILE: str = "/tmp/moray_cgroup_mock.bin"
 
 # Resource and Safety Ceilings
 MAX_MAP_FILE_BYTES: int = 64 * 1024  # 64 KB heap ceiling clamp (Radare2 Issue #12924)
@@ -261,6 +264,61 @@ def wire_bytes_to_ip(raw: bytes) -> str:
     if len(raw) != 4:
         raise MorayQuarantineError(f"Expected 4 bytes for IPv4 address, got {len(raw)}")
     return socket.inet_ntoa(raw)
+
+
+def resolve_cgroup_id(target: object) -> int:
+    """
+    Resolve a cgroup path, decimal integer, or hex string to a 64-bit unsigned cgroup ID.
+    Rejects negative numbers, booleans, zero, out-of-range IDs (> 2^64-1), and symlinks.
+    """
+    if isinstance(target, bool) or target is None:
+        raise MorayQuarantineError(
+            f"Cgroup identifier must be an integer or path string, got {type(target).__name__}"
+        )
+
+    if isinstance(target, int):
+        if target <= 0 or target > 0xFFFFFFFFFFFFFFFF:
+            raise MorayQuarantineError(
+                f"Cgroup ID out of 64-bit unsigned range (1 to 2^64-1): {target}"
+            )
+        return target
+
+    if not isinstance(target, str):
+        raise MorayQuarantineError(
+            f"Cgroup identifier must be an integer or path string, got {type(target).__name__}"
+        )
+
+    s = target.strip()
+    if not s:
+        raise MorayQuarantineError("Cgroup target cannot be empty")
+
+    # Direct numeric parsing (e.g. "12345" or "0xabcd")
+    if s.isdigit() or (s.startswith("0x") and len(s) > 2):
+        try:
+            val = int(s, 0)
+            if val <= 0 or val > 0xFFFFFFFFFFFFFFFF:
+                raise MorayQuarantineError(f"Cgroup ID out of 64-bit unsigned range: {val}")
+            return val
+        except ValueError:
+            pass
+
+    # Path resolution: check anti-traversal symlink invariant
+    if os.path.islink(s):
+        raise MorayQuarantineError(
+            f"Symlink cgroup path rejected for security (anti-traversal invariant): {s}"
+        )
+
+    if not os.path.exists(s):
+        raise MorayQuarantineError(f"Cgroup path does not exist: {s}")
+
+    st = os.stat(s)
+    if not stat.S_ISDIR(st.st_mode):
+        raise MorayQuarantineError(f"Cgroup target path must be a directory: {s}")
+
+    cgroup_id = int(st.st_ino)
+    if cgroup_id <= 0 or cgroup_id > 0xFFFFFFFFFFFFFFFF:
+        raise MorayQuarantineError(f"Extracted cgroup inode {cgroup_id} out of 64-bit range")
+    return cgroup_id
 
 
 def is_entry_expired(entry: MorayQuarantineEntry, now_ns: int | None = None) -> bool:
@@ -464,16 +522,20 @@ class MorayHook:
         map_path: str = DEFAULT_QUARANTINE_PIN,
         events_path: str = DEFAULT_EVENTS_PIN,
         xdp_map_path: str = DEFAULT_XDP_PIN,
+        cgroup_map_path: str = DEFAULT_CGROUP_PIN,
         mock_mode: bool = False,
     ) -> None:
         self.map_path: str = map_path
         self.events_path: str = events_path
         self.xdp_map_path: str = xdp_map_path
+        self.cgroup_map_path: str = cgroup_map_path
         self.mock_mode: bool = mock_mode
         self._mock_table: dict[int, MorayQuarantineEntry] = {}
         self._mock_xdp_table: dict[bytes, int] = {}
+        self._mock_cgroup_table: dict[int, MorayQuarantineEntry] = {}
         self._bpf_map_fd: int = -1
         self._bpf_xdp_fd: int = -1
+        self._bpf_cgroup_fd: int = -1
         self._consumer: MorayTelemetryConsumer | None = None
 
         # Anti-Traversal Invariant: Reject symbolic links to prevent state redirection
@@ -489,6 +551,10 @@ class MorayHook:
             raise MorayQuarantineError(
                 f"Symlink xdp map path rejected for security (anti-traversal invariant): {self.xdp_map_path}"
             )
+        if os.path.islink(self.cgroup_map_path):
+            raise MorayQuarantineError(
+                f"Symlink cgroup map path rejected for security (anti-traversal invariant): {self.cgroup_map_path}"
+            )
 
         if not self.mock_mode and not os.path.exists(self.map_path):
             self.mock_mode = True
@@ -500,12 +566,17 @@ class MorayHook:
                 self.xdp_map_path = DEFAULT_MOCK_XDP_FILE
             if self.events_path == DEFAULT_EVENTS_PIN:
                 self.events_path = DEFAULT_MOCK_EVENTS_FILE
+            if self.cgroup_map_path == DEFAULT_CGROUP_PIN:
+                self.cgroup_map_path = DEFAULT_MOCK_CGROUP_FILE
             self._with_lock(self._load_mock_file)
             self._with_xdp_lock(self._load_mock_xdp_file)
+            self._with_cgroup_lock(self._load_mock_cgroup_file)
         else:
             self._open_bpf_map()
             if os.path.exists(self.xdp_map_path):
                 self._open_bpf_xdp_map()
+            if os.path.exists(self.cgroup_map_path):
+                self._open_bpf_cgroup_map()
 
     def get_consumer(self) -> MorayTelemetryConsumer:
         """Get or initialize the telemetry consumer."""
@@ -598,6 +669,25 @@ class MorayHook:
             )
         self._bpf_xdp_fd = fd
 
+    def _open_bpf_cgroup_map(self) -> None:
+        """Open pinned cgroup map via sys_bpf(BPF_OBJ_GET)."""
+        libc = ctypes.CDLL(None, use_errno=True)
+        b_path = self.cgroup_map_path.encode("utf-8")
+        path_buf = ctypes.create_string_buffer(b_path)
+        attr = BpfAttrObjGet(
+            pathname=ctypes.cast(path_buf, ctypes.c_void_p).value or 0,
+            bpf_fd=0,
+            file_flags=0,
+        )
+        nr = get_bpf_syscall_nr()
+        fd = libc.syscall(nr, BPF_OBJ_GET, ctypes.byref(attr), ctypes.sizeof(attr))
+        if fd < 0:
+            err = ctypes.get_errno()
+            raise MorayQuarantineError(
+                f"Failed to access pinned cgroup map at '{self.cgroup_map_path}': {os.strerror(err)} (code {err})"
+            )
+        self._bpf_cgroup_fd = fd
+
     def close(self) -> None:
         if self._consumer:
             self._consumer.close()
@@ -608,9 +698,14 @@ class MorayHook:
         if self._bpf_xdp_fd >= 0:
             os.close(self._bpf_xdp_fd)
             self._bpf_xdp_fd = -1
+        if self._bpf_cgroup_fd >= 0:
+            os.close(self._bpf_cgroup_fd)
+            self._bpf_cgroup_fd = -1
 
     def _with_lock(self, func: Callable[[], T]) -> T:
         """Serialize map operations across processes and threads using POSIX file lock."""
+        if not self.mock_mode or self.map_path.startswith("/sys/fs/bpf"):
+            return func()
         lock_path = f"{self.map_path}.lock"
         target_dir = os.path.dirname(self.map_path)
         if target_dir:
@@ -624,8 +719,25 @@ class MorayHook:
 
     def _with_xdp_lock(self, func: Callable[[], T]) -> T:
         """Serialize XDP map operations across processes and threads using POSIX file lock."""
+        if not self.mock_mode or self.xdp_map_path.startswith("/sys/fs/bpf"):
+            return func()
         lock_path = f"{self.xdp_map_path}.lock"
         target_dir = os.path.dirname(self.xdp_map_path)
+        if target_dir:
+            os.makedirs(target_dir, exist_ok=True)
+        with open(lock_path, "w") as lock_f:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            try:
+                return func()
+            finally:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+
+    def _with_cgroup_lock(self, func: Callable[[], T]) -> T:
+        """Serialize cgroup map operations across processes and threads using POSIX file lock."""
+        if not self.mock_mode or self.cgroup_map_path.startswith("/sys/fs/bpf"):
+            return func()
+        lock_path = f"{self.cgroup_map_path}.lock"
+        target_dir = os.path.dirname(self.cgroup_map_path)
         if target_dir:
             os.makedirs(target_dir, exist_ok=True)
         with open(lock_path, "w") as lock_f:
@@ -857,12 +969,14 @@ class MorayHook:
         status: str = "healthy"
         map_accessible = False
         xdp_accessible = False
+        cgroup_accessible = False
         bpffs_mounted = False
         bpf_lsm_active = False
 
         if self.mock_mode:
             map_accessible = True
             xdp_accessible = True
+            cgroup_accessible = True
             bpffs_mounted = True
             bpf_lsm_active = True
         else:
@@ -874,6 +988,9 @@ class MorayHook:
 
             if os.path.exists(self.xdp_map_path):
                 xdp_accessible = True
+
+            if os.path.exists(self.cgroup_map_path):
+                cgroup_accessible = True
 
             if os.path.exists("/sys/fs/bpf"):
                 bpffs_mounted = True
@@ -907,10 +1024,13 @@ class MorayHook:
             "map_accessible": map_accessible,
             "xdp_map_path": self.xdp_map_path,
             "xdp_accessible": xdp_accessible,
+            "cgroup_map_path": self.cgroup_map_path,
+            "cgroup_accessible": cgroup_accessible,
             "bpffs_mounted": bpffs_mounted,
             "bpf_lsm_active": bpf_lsm_active,
             "quarantined_count": len(self.list_quarantined()),
             "xdp_dropped_count": len(self.xdp_list_dropped()),
+            "cgroup_quarantined_count": len(self.list_quarantined_cgroups()),
             "warnings": warnings,
         }
 
@@ -1289,6 +1409,317 @@ class MorayHook:
             return self._with_xdp_lock(_do_flush)
         return 0
 
+    # -------------------------------------------------------------------------
+    # Phase 6.5: Cgroup v2 Containment Scoping & Map Lifecycle
+    # -------------------------------------------------------------------------
+
+    def _sync_mock_cgroup_file(self) -> None:
+        if os.path.islink(self.cgroup_map_path):
+            raise MorayQuarantineError(
+                f"Symlink cgroup map path rejected for security: {self.cgroup_map_path}"
+            )
+
+        try:
+            target_dir = os.path.dirname(self.cgroup_map_path)
+            if target_dir:
+                os.makedirs(target_dir, exist_ok=True)
+
+            tmp_path = (
+                f"{self.cgroup_map_path}.tmp.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}"
+            )
+            with open(tmp_path, "wb") as f:
+                for cgroup_id, entry in self._mock_cgroup_table.items():
+                    f.write(struct.pack("<Q", cgroup_id))  # 8 bytes unsigned 64-bit int
+                    f.write(bytes(entry))  # 24 bytes MorayQuarantineEntry
+                f.flush()
+                os.fsync(f.fileno())
+
+            os.replace(tmp_path, self.cgroup_map_path)
+        except OSError as exc:
+            raise MorayQuarantineError(f"Failed to sync mock cgroup map: {exc}") from exc
+
+    def _load_mock_cgroup_file(self) -> None:
+        if not os.path.exists(self.cgroup_map_path):
+            return
+
+        if os.path.islink(self.cgroup_map_path):
+            raise MorayQuarantineError(
+                f"Symlink cgroup map path rejected for security: {self.cgroup_map_path}"
+            )
+
+        try:
+            sz = os.path.getsize(self.cgroup_map_path)
+            if sz > MAX_MAP_FILE_BYTES:
+                raise MorayQuarantineError(
+                    f"Cgroup map file size exceeds {MAX_MAP_FILE_BYTES} byte ceiling: {sz}"
+                )
+
+            with open(self.cgroup_map_path, "rb") as f:
+                data = f.read(MAX_MAP_FILE_BYTES + 1)
+
+            if len(data) > MAX_MAP_FILE_BYTES:
+                raise MorayQuarantineError(
+                    f"Cgroup map payload exceeds {MAX_MAP_FILE_BYTES} byte ceiling: {len(data)}"
+                )
+
+            entry_sz = 32  # 8 bytes cgroup_id + 24 bytes MorayQuarantineEntry
+            if len(data) % entry_sz != 0:
+                raise MorayQuarantineError(
+                    f"Corrupted cgroup map: size {len(data)} is not a multiple of {entry_sz}"
+                )
+
+            count = len(data) // entry_sz
+            self._mock_cgroup_table.clear()
+            for i in range(count):
+                chunk = data[i * entry_sz : (i + 1) * entry_sz]
+                cgroup_id = struct.unpack("<Q", chunk[:8])[0]
+                entry = MorayQuarantineEntry.from_buffer_copy(chunk[8:])
+                self._mock_cgroup_table[cgroup_id] = entry
+        except OSError as exc:
+            raise MorayQuarantineError(f"Failed to load mock cgroup map: {exc}") from exc
+
+    def _bpf_cgroup_update_elem(self, cgroup_id: int, entry: MorayQuarantineEntry) -> bool:
+        if self.mock_mode or self._bpf_cgroup_fd < 0:
+            self._mock_cgroup_table[cgroup_id] = entry
+            self._sync_mock_cgroup_file()
+            return True
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        k = ctypes.c_uint64(cgroup_id)
+        attr = BpfAttrMapElem(
+            map_fd=self._bpf_cgroup_fd,
+            pad0=0,
+            key=ctypes.addressof(k),
+            value=ctypes.addressof(entry),
+            flags=BPF_ANY,
+        )
+        nr = get_bpf_syscall_nr()
+        ret = libc.syscall(nr, BPF_MAP_UPDATE_ELEM, ctypes.byref(attr), ctypes.sizeof(attr))
+        if ret != 0:
+            err = ctypes.get_errno()
+            raise MorayQuarantineError(
+                f"bpf(BPF_MAP_UPDATE_ELEM) failed for cgroup: {os.strerror(err)}"
+            )
+        return True
+
+    def _bpf_cgroup_lookup_elem(self, cgroup_id: int) -> MorayQuarantineEntry | None:
+        if self.mock_mode or self._bpf_cgroup_fd < 0:
+            self._load_mock_cgroup_file()
+            return self._mock_cgroup_table.get(cgroup_id)
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        k = ctypes.c_uint64(cgroup_id)
+        entry = MorayQuarantineEntry()
+        attr = BpfAttrMapElem(
+            map_fd=self._bpf_cgroup_fd,
+            pad0=0,
+            key=ctypes.addressof(k),
+            value=ctypes.addressof(entry),
+            flags=0,
+        )
+        nr = get_bpf_syscall_nr()
+        ret = libc.syscall(nr, BPF_MAP_LOOKUP_ELEM, ctypes.byref(attr), ctypes.sizeof(attr))
+        if ret != 0:
+            err = ctypes.get_errno()
+            if err == 2:  # ENOENT
+                return None
+            raise MorayQuarantineError(
+                f"bpf(BPF_MAP_LOOKUP_ELEM) failed for cgroup: {os.strerror(err)}"
+            )
+        return entry
+
+    def _bpf_cgroup_delete_elem(self, cgroup_id: int) -> bool:
+        if self.mock_mode or self._bpf_cgroup_fd < 0:
+            if cgroup_id in self._mock_cgroup_table:
+                del self._mock_cgroup_table[cgroup_id]
+                self._sync_mock_cgroup_file()
+                return True
+            return False
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        k = ctypes.c_uint64(cgroup_id)
+        attr = BpfAttrMapElem(
+            map_fd=self._bpf_cgroup_fd,
+            pad0=0,
+            key=ctypes.addressof(k),
+            value=0,
+            flags=0,
+        )
+        nr = get_bpf_syscall_nr()
+        ret = libc.syscall(nr, BPF_MAP_DELETE_ELEM, ctypes.byref(attr), ctypes.sizeof(attr))
+        if ret != 0:
+            err = ctypes.get_errno()
+            if err == 2:  # ENOENT
+                return False
+            raise MorayQuarantineError(
+                f"bpf(BPF_MAP_DELETE_ELEM) failed for cgroup: {os.strerror(err)}"
+            )
+        return True
+
+    def quarantine_cgroup(
+        self,
+        target: str | int,
+        action_flags: int = MORAY_ACT_BLOCK_EXEC,
+        reason: int = MORAY_REASON_LOBSTER_L7,
+        ttl_seconds: int = 0,
+    ) -> bool:
+        """Assert quarantine containment on a cgroup v2 hierarchy."""
+        cgroup_id = resolve_cgroup_id(target)
+        if ttl_seconds < 0:
+            raise MorayQuarantineError(f"TTL must be >= 0 seconds, got {ttl_seconds}")
+
+        entry = MorayQuarantineEntry(
+            action_flags=action_flags,
+            reason=reason,
+            timestamp_ns=time.time_ns(),
+            strike_count=1,
+            ttl_seconds=ttl_seconds,
+        )
+
+        if self.mock_mode:
+
+            def _do_quarantine() -> bool:
+                return self._bpf_cgroup_update_elem(cgroup_id, entry)
+
+            return self._with_cgroup_lock(_do_quarantine)
+
+        if self._bpf_cgroup_fd < 0 and os.path.exists(self.cgroup_map_path):
+            self._open_bpf_cgroup_map()
+        return self._bpf_cgroup_update_elem(cgroup_id, entry)
+
+    def release_cgroup(self, target: str | int) -> bool:
+        """Release a cgroup v2 hierarchy from quarantine."""
+        cgroup_id = resolve_cgroup_id(target)
+
+        if self.mock_mode:
+
+            def _do_release() -> bool:
+                return self._bpf_cgroup_delete_elem(cgroup_id)
+
+            return self._with_cgroup_lock(_do_release)
+
+        if self._bpf_cgroup_fd < 0 and os.path.exists(self.cgroup_map_path):
+            self._open_bpf_cgroup_map()
+        return self._bpf_cgroup_delete_elem(cgroup_id)
+
+    def is_cgroup_quarantined(self, target: str | int) -> bool:
+        """Check if a cgroup v2 hierarchy is actively quarantined."""
+        cgroup_id = resolve_cgroup_id(target)
+
+        if self.mock_mode:
+
+            def _do_check() -> bool:
+                entry = self._bpf_cgroup_lookup_elem(cgroup_id)
+                if entry is None:
+                    return False
+                return not is_entry_expired(entry)
+
+            return self._with_cgroup_lock(_do_check)
+
+        if self._bpf_cgroup_fd < 0 and os.path.exists(self.cgroup_map_path):
+            self._open_bpf_cgroup_map()
+        entry = self._bpf_cgroup_lookup_elem(cgroup_id)
+        if entry is None:
+            return False
+        return not is_entry_expired(entry)
+
+    def get_cgroup_entry(self, target: str | int) -> MorayQuarantineEntry | None:
+        """Retrieve raw quarantine entry for a cgroup."""
+        cgroup_id = resolve_cgroup_id(target)
+
+        if self.mock_mode:
+
+            def _do_get() -> MorayQuarantineEntry | None:
+                return self._bpf_cgroup_lookup_elem(cgroup_id)
+
+            return self._with_cgroup_lock(_do_get)
+
+        if self._bpf_cgroup_fd < 0 and os.path.exists(self.cgroup_map_path):
+            self._open_bpf_cgroup_map()
+        return self._bpf_cgroup_lookup_elem(cgroup_id)
+
+    def get_cgroup_status(self, target: str | int) -> dict[str, object]:
+        """Query structured quarantine status for a cgroup."""
+        cgroup_id = resolve_cgroup_id(target)
+        entry = self.get_cgroup_entry(cgroup_id)
+        if entry is None:
+            return {
+                "cgroup_id": cgroup_id,
+                "state": "RELEASED",
+                "state_code": MORAY_STATE_RELEASED,
+                "quarantined": False,
+                "action_flags": 0,
+                "allow_loopback": False,
+                "strike_count": 0,
+                "ttl_seconds": 0,
+                "remaining_seconds": 0,
+                "reason": MORAY_REASON_UNKNOWN,
+            }
+
+        now_ns = time.time_ns()
+        expired = is_entry_expired(entry, now_ns)
+        rem_ttl = 0
+        if entry.ttl_seconds > 0:
+            elapsed_ns = now_ns - entry.timestamp_ns
+            total_ttl_ns = entry.ttl_seconds * 1_000_000_000
+            rem_ttl = max(0, int((total_ttl_ns - elapsed_ns) / 1_000_000_000))
+
+        state_code = MORAY_STATE_EXPIRED if expired else MORAY_STATE_ACTIVE
+        state_str = "EXPIRED" if expired else "ACTIVE"
+
+        return {
+            "cgroup_id": cgroup_id,
+            "state": state_str,
+            "state_code": state_code,
+            "quarantined": not expired,
+            "action_flags": entry.action_flags,
+            "allow_loopback": bool(entry.action_flags & MORAY_ACT_ALLOW_LOOPBACK),
+            "strike_count": entry.strike_count,
+            "ttl_seconds": entry.ttl_seconds,
+            "remaining_seconds": rem_ttl,
+            "reason": entry.reason,
+            "timestamp_ns": entry.timestamp_ns,
+        }
+
+    def list_quarantined_cgroups(
+        self, include_expired: bool = False
+    ) -> list[tuple[int, MorayQuarantineEntry]]:
+        """List all quarantined cgroup entries."""
+        if not self.mock_mode:
+            return []
+
+        def _do_list() -> list[tuple[int, MorayQuarantineEntry]]:
+            self._load_mock_cgroup_file()
+            if include_expired:
+                return list(self._mock_cgroup_table.items())
+            now_ns = time.time_ns()
+            return [
+                (cid, entry)
+                for cid, entry in self._mock_cgroup_table.items()
+                if not is_entry_expired(entry, now_ns)
+            ]
+
+        return self._with_cgroup_lock(_do_list)
+
+    def flush_cgroups(self, force: bool = False) -> int:
+        """Purge all entries from the cgroup containment map."""
+        if not force:
+            raise MorayQuarantineError(
+                "Cgroup flush requires explicit confirmation (force=True / --force)."
+            )
+
+        if not self.mock_mode:
+            return 0
+
+        def _do_flush() -> int:
+            self._load_mock_cgroup_file()
+            count = len(self._mock_cgroup_table)
+            self._mock_cgroup_table.clear()
+            self._sync_mock_cgroup_file()
+            return count
+
+        return self._with_cgroup_lock(_do_flush)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -1300,6 +1731,11 @@ def main() -> None:
         "--report-tamper",
         action="store_true",
         help="Assert immediate anti-tamper quarantine on target PID (reason=TAMPER_ATTEMPT)",
+    )
+    parser.add_argument(
+        "--block-exec",
+        action="store_true",
+        help="Strike target PID or cgroup with execution block (MORAY_ACT_BLOCK_EXEC)",
     )
     parser.add_argument(
         "--block-wan",
@@ -1413,6 +1849,37 @@ def main() -> None:
         default=DEFAULT_XDP_PIN,
         help="Path to pinned XDP drop map or mock file",
     )
+    parser.add_argument(
+        "--quarantine-cgroup",
+        type=str,
+        help="Target cgroup v2 hierarchy (path or 64-bit ID) to quarantine",
+    )
+    parser.add_argument(
+        "--release-cgroup",
+        type=str,
+        help="Release cgroup v2 hierarchy (path or 64-bit ID) from quarantine",
+    )
+    parser.add_argument(
+        "--cgroup-status",
+        type=str,
+        help="Query structured quarantine status for cgroup v2 hierarchy",
+    )
+    parser.add_argument(
+        "--list-cgroups",
+        action="store_true",
+        help="List all quarantined cgroup v2 hierarchies",
+    )
+    parser.add_argument(
+        "--flush-cgroups",
+        action="store_true",
+        help="Purge all cgroup v2 quarantine entries (requires --force)",
+    )
+    parser.add_argument(
+        "--cgroup-map-path",
+        type=str,
+        default=DEFAULT_CGROUP_PIN,
+        help="Path to pinned cgroup map or mock file",
+    )
     parser.add_argument("--mock", action="store_true", help="Force mock testing mode")
     parser.add_argument("--json", action="store_true", help="Format output as structured JSON")
 
@@ -1423,6 +1890,7 @@ def main() -> None:
             map_path=args.map_path,
             events_path=args.events_path,
             xdp_map_path=args.xdp_map_path,
+            cgroup_map_path=args.cgroup_map_path,
             mock_mode=args.mock,
         )
 
@@ -1452,6 +1920,127 @@ def main() -> None:
                 )
                 print(
                     f"[+] MORAY STRIKE ASSERTED: PID {args.pid} entered in-kernel quarantine{ttl_msg}{loop_msg}."
+                )
+        elif args.quarantine_cgroup:
+            action = args.action
+            if args.block_exec:
+                action = MORAY_ACT_BLOCK_EXEC
+            elif args.block_wan:
+                action = MORAY_ACT_BLOCK_SOCKET | MORAY_ACT_ALLOW_LOOPBACK
+            elif args.deny_all_net:
+                action = MORAY_ACT_BLOCK_SOCKET | MORAY_ACT_DROP_NET
+            elif args.allow_loopback:
+                action |= MORAY_ACT_ALLOW_LOOPBACK
+
+            hook.quarantine_cgroup(
+                args.quarantine_cgroup,
+                action_flags=action,
+                reason=args.reason,
+                ttl_seconds=args.ttl,
+            )
+            cid = resolve_cgroup_id(args.quarantine_cgroup)
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "status": "asserted",
+                            "cgroup": args.quarantine_cgroup,
+                            "cgroup_id": cid,
+                            "action_flags": action,
+                            "ttl_seconds": args.ttl,
+                            "allow_loopback": bool(action & MORAY_ACT_ALLOW_LOOPBACK),
+                        }
+                    )
+                )
+            else:
+                ttl_msg = f" (TTL: {args.ttl}s)" if args.ttl > 0 else " (Permanent)"
+                loop_msg = (
+                    " [Granular Loopback Allowed]" if (action & MORAY_ACT_ALLOW_LOOPBACK) else ""
+                )
+                print(
+                    f"[+] MORAY CGROUP QUARANTINE ASSERTED: Cgroup '{args.quarantine_cgroup}' (ID {cid}) entered in-kernel quarantine{ttl_msg}{loop_msg}."
+                )
+        elif args.release_cgroup:
+            released = hook.release_cgroup(args.release_cgroup)
+            cid = resolve_cgroup_id(args.release_cgroup)
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "status": "released" if released else "not_found",
+                            "cgroup": args.release_cgroup,
+                            "cgroup_id": cid,
+                        }
+                    )
+                )
+            else:
+                if released:
+                    print(
+                        f"[+] MORAY CGROUP RELEASE: Cgroup '{args.release_cgroup}' (ID {cid}) released from quarantine."
+                    )
+                else:
+                    print(f"[-] Cgroup '{args.release_cgroup}' was not actively quarantined.")
+        elif args.cgroup_status:
+            stat_res = hook.get_cgroup_status(args.cgroup_status)
+            if args.json:
+                print(json.dumps(stat_res, indent=2))
+            else:
+                print("[*] Moray Cgroup Quarantine Status:")
+                print(f"  Target:            {args.cgroup_status}")
+                print(f"  Cgroup ID:         {stat_res['cgroup_id']}")
+                print(f"  State:             {stat_res['state']} ({stat_res['state_code']})")
+                print(f"  Quarantined:       {stat_res['quarantined']}")
+                print(f"  Action Flags:      {stat_res['action_flags']:#04x}")
+                print(f"  Allow Loopback:    {stat_res['allow_loopback']}")
+                print(f"  Strike Count:      {stat_res['strike_count']}")
+                print(f"  Remaining TTL:     {stat_res['remaining_seconds']}s")
+        elif args.list_cgroups:
+            cgroups = hook.list_quarantined_cgroups()
+            if args.json:
+                out = [
+                    {
+                        "cgroup_id": cid,
+                        "action_flags": entry.action_flags,
+                        "reason": entry.reason,
+                        "strike_count": entry.strike_count,
+                        "ttl_seconds": entry.ttl_seconds,
+                    }
+                    for cid, entry in cgroups
+                ]
+                print(json.dumps(out, indent=2))
+            else:
+                print(f"[*] Quarantined Cgroups: {len(cgroups)}")
+                for cid, entry in cgroups:
+                    print(
+                        f"  Cgroup ID {cid} | Flags: {entry.action_flags:#04x} | Hits: {entry.strike_count}"
+                    )
+        elif args.flush_cgroups:
+            flushed = hook.flush_cgroups(force=args.force)
+            if args.json:
+                print(json.dumps({"status": "cgroups_flushed", "count": flushed}))
+            else:
+                print(f"[!] BREAK-GLASS CGROUP FLUSH: Purged {flushed} quarantined cgroups.")
+        elif args.block_exec:
+            if not args.pid:
+                parser.error("--block-exec requires --pid <PID>")
+            action = MORAY_ACT_BLOCK_EXEC
+            hook.strike(args.pid, action_flags=action, reason=args.reason, ttl_seconds=args.ttl)
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "status": "asserted",
+                            "policy": "block-exec",
+                            "pid": args.pid,
+                            "action_flags": action,
+                            "ttl_seconds": args.ttl,
+                        }
+                    )
+                )
+            else:
+                ttl_msg = f" (TTL: {args.ttl}s)" if args.ttl > 0 else " (Permanent)"
+                print(
+                    f"[+] MORAY EXECUTION POLICY ASSERTED: PID {args.pid} blocked from execve{ttl_msg}."
                 )
         elif args.block_wan:
             if not args.pid:

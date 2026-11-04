@@ -38,6 +38,40 @@ struct {
     __type(value, __u8);
 } moray_xdp_drop_map SEC(".maps");
 
+/* Cgroup v2 Quarantine Map shared with Project Lobster
+ * Key: Cgroup ID (__u64)
+ * Value: struct moray_quarantine_entry (24 bytes)
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MORAY_MAX_ENTRIES);
+    __type(key, __u64);
+    __type(value, struct moray_quarantine_entry);
+} moray_cgroup_map SEC(".maps");
+
+/*
+ * Invariant I_1: Look up quarantine entry for current task.
+ * 1. Checks process TGID.
+ * 2. Checks individual thread PID.
+ * 3. Checks cgroup v2 hierarchy (bpf_get_current_cgroup_id) for subtree containment.
+ */
+static __attribute__((always_inline)) struct moray_quarantine_entry *lookup_quarantine_entry(
+    __u32 tgid,
+    __u32 pid)
+{
+    struct moray_quarantine_entry *entry = bpf_map_lookup_elem(&moray_quarantine_map, &tgid);
+    if (!entry) {
+        entry = bpf_map_lookup_elem(&moray_quarantine_map, &pid);
+    }
+    if (!entry) {
+        __u64 cgroup_id = bpf_get_current_cgroup_id();
+        if (cgroup_id) {
+            entry = bpf_map_lookup_elem(&moray_cgroup_map, &cgroup_id);
+        }
+    }
+    return entry;
+}
+
 /*
  * Internal helper to record and transmit strike telemetry
  */
@@ -78,11 +112,7 @@ int BPF_PROG(moray_bprm_strike, struct linux_binprm *bprm)
     __u32 tgid = (__u32)(pid_tgid >> 32);
     __u32 pid = (__u32)pid_tgid;
 
-    struct moray_quarantine_entry *entry = bpf_map_lookup_elem(&moray_quarantine_map, &tgid);
-    if (!entry) {
-        /* Also check individual thread PID if threaded agent */
-        entry = bpf_map_lookup_elem(&moray_quarantine_map, &pid);
-    }
+    struct moray_quarantine_entry *entry = lookup_quarantine_entry(tgid, pid);
 
     if (entry && (entry->action_flags & MORAY_ACT_BLOCK_EXEC)) {
         __u32 hits = __sync_fetch_and_add(&entry->strike_count, 1) + 1;
@@ -111,10 +141,7 @@ int BPF_PROG(moray_socket_strike, struct socket *sock, struct sockaddr *address,
     __u32 tgid = (__u32)(pid_tgid >> 32);
     __u32 pid = (__u32)pid_tgid;
 
-    struct moray_quarantine_entry *entry = bpf_map_lookup_elem(&moray_quarantine_map, &tgid);
-    if (!entry) {
-        entry = bpf_map_lookup_elem(&moray_quarantine_map, &pid);
-    }
+    struct moray_quarantine_entry *entry = lookup_quarantine_entry(tgid, pid);
 
     if (entry && (entry->action_flags & MORAY_ACT_BLOCK_SOCKET)) {
         /* If granular loopback policy is set, permit local IPC and localhost loopback */
@@ -175,10 +202,7 @@ int BPF_PROG(moray_bpf_strike, int cmd, union bpf_attr *attr, unsigned int size)
     __u32 tgid = (__u32)(pid_tgid >> 32);
     __u32 pid = (__u32)pid_tgid;
 
-    struct moray_quarantine_entry *entry = bpf_map_lookup_elem(&moray_quarantine_map, &tgid);
-    if (!entry) {
-        entry = bpf_map_lookup_elem(&moray_quarantine_map, &pid);
-    }
+    struct moray_quarantine_entry *entry = lookup_quarantine_entry(tgid, pid);
 
     if (entry) {
         __u32 hits = __sync_fetch_and_add(&entry->strike_count, 1) + 1;
