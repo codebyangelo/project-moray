@@ -13,6 +13,7 @@ import ctypes.util
 import fcntl
 import json
 import os
+import socket
 import struct
 import sys
 import threading
@@ -57,6 +58,9 @@ MORAY_STRIKE_TIER3: int = 5  # 5 hits: Auto-escalate to SIGKILL
 DEFAULT_PIN_DIR: str = "/sys/fs/bpf/moray"
 DEFAULT_QUARANTINE_PIN: str = "/sys/fs/bpf/moray/quarantine_map"
 DEFAULT_EVENTS_PIN: str = "/sys/fs/bpf/moray/events"
+DEFAULT_XDP_PIN: str = "/sys/fs/bpf/moray/xdp_drop_map"
+DEFAULT_MOCK_QUARANTINE_FILE: str = "/tmp/moray_quarantine_mock.bin"
+DEFAULT_MOCK_XDP_FILE: str = "/tmp/moray_xdp_mock.bin"
 DEFAULT_MOCK_EVENTS_FILE: str = "/tmp/moray_events_mock.jsonl"
 
 # Resource and Safety Ceilings
@@ -221,6 +225,42 @@ def validate_pid(pid: int) -> None:
         raise MorayQuarantineError(f"PID must be an integer, got {type(pid).__name__}")
     if pid < PID_MIN or pid > PID_MAX:
         raise MorayQuarantineError(f"PID out of permissible range ({PID_MIN}-{PID_MAX}): {pid}")
+
+
+def validate_ipv4(ip_str: object) -> None:
+    """
+    Strict validation of IPv4 address.
+    Rejects non-strings, booleans, non-dotted, out-of-range octets, or malformed addresses fail-closed.
+    """
+    if not isinstance(ip_str, str) or isinstance(ip_str, bool):
+        raise MorayQuarantineError(f"IP address must be a string, got {type(ip_str).__name__}")
+    parts = ip_str.strip().split(".")
+    if len(parts) != 4:
+        raise MorayQuarantineError(f"Invalid IPv4 format (expected 4 dotted octets): '{ip_str}'")
+    for part in parts:
+        if not part.isdigit():
+            raise MorayQuarantineError(f"Invalid non-numeric octet in IP: '{ip_str}'")
+        val = int(part)
+        if val < 0 or val > 255:
+            raise MorayQuarantineError(
+                f"Octet value {val} out of permissible range (0-255): '{ip_str}'"
+            )
+
+
+def ip_to_wire_bytes(ip_str: str) -> bytes:
+    """Convert dotted IPv4 string to 4 bytes in network wire order (big-endian)."""
+    validate_ipv4(ip_str)
+    try:
+        return socket.inet_aton(ip_str.strip())
+    except OSError as exc:
+        raise MorayQuarantineError(f"Failed to parse IPv4 address '{ip_str}': {exc}") from exc
+
+
+def wire_bytes_to_ip(raw: bytes) -> str:
+    """Convert 4-byte network wire buffer back to dotted IPv4 string."""
+    if len(raw) != 4:
+        raise MorayQuarantineError(f"Expected 4 bytes for IPv4 address, got {len(raw)}")
+    return socket.inet_ntoa(raw)
 
 
 def is_entry_expired(entry: MorayQuarantineEntry, now_ns: int | None = None) -> bool:
@@ -423,13 +463,17 @@ class MorayHook:
         self,
         map_path: str = DEFAULT_QUARANTINE_PIN,
         events_path: str = DEFAULT_EVENTS_PIN,
+        xdp_map_path: str = DEFAULT_XDP_PIN,
         mock_mode: bool = False,
     ) -> None:
         self.map_path: str = map_path
         self.events_path: str = events_path
+        self.xdp_map_path: str = xdp_map_path
         self.mock_mode: bool = mock_mode
         self._mock_table: dict[int, MorayQuarantineEntry] = {}
+        self._mock_xdp_table: dict[bytes, int] = {}
         self._bpf_map_fd: int = -1
+        self._bpf_xdp_fd: int = -1
         self._consumer: MorayTelemetryConsumer | None = None
 
         # Anti-Traversal Invariant: Reject symbolic links to prevent state redirection
@@ -441,16 +485,27 @@ class MorayHook:
             raise MorayQuarantineError(
                 f"Symlink events path rejected for security (anti-traversal invariant): {self.events_path}"
             )
+        if os.path.islink(self.xdp_map_path):
+            raise MorayQuarantineError(
+                f"Symlink xdp map path rejected for security (anti-traversal invariant): {self.xdp_map_path}"
+            )
 
         if not self.mock_mode and not os.path.exists(self.map_path):
             self.mock_mode = True
 
         if self.mock_mode:
-            self._with_lock(self._load_mock_file)
+            if self.map_path == DEFAULT_QUARANTINE_PIN:
+                self.map_path = DEFAULT_MOCK_QUARANTINE_FILE
+            if self.xdp_map_path == DEFAULT_XDP_PIN:
+                self.xdp_map_path = DEFAULT_MOCK_XDP_FILE
             if self.events_path == DEFAULT_EVENTS_PIN:
                 self.events_path = DEFAULT_MOCK_EVENTS_FILE
+            self._with_lock(self._load_mock_file)
+            self._with_xdp_lock(self._load_mock_xdp_file)
         else:
             self._open_bpf_map()
+            if os.path.exists(self.xdp_map_path):
+                self._open_bpf_xdp_map()
 
     def get_consumer(self) -> MorayTelemetryConsumer:
         """Get or initialize the telemetry consumer."""
@@ -524,6 +579,25 @@ class MorayHook:
             )
         self._bpf_map_fd = fd
 
+    def _open_bpf_xdp_map(self) -> None:
+        """Open pinned XDP drop map via sys_bpf(BPF_OBJ_GET)."""
+        libc = ctypes.CDLL(None, use_errno=True)
+        b_path = self.xdp_map_path.encode("utf-8")
+        path_buf = ctypes.create_string_buffer(b_path)
+        attr = BpfAttrObjGet(
+            pathname=ctypes.cast(path_buf, ctypes.c_void_p).value or 0,
+            bpf_fd=0,
+            file_flags=0,
+        )
+        nr = get_bpf_syscall_nr()
+        fd = libc.syscall(nr, BPF_OBJ_GET, ctypes.byref(attr), ctypes.sizeof(attr))
+        if fd < 0:
+            err = ctypes.get_errno()
+            raise MorayQuarantineError(
+                f"Failed to access pinned XDP map at '{self.xdp_map_path}': {os.strerror(err)} (code {err})"
+            )
+        self._bpf_xdp_fd = fd
+
     def close(self) -> None:
         if self._consumer:
             self._consumer.close()
@@ -531,11 +605,27 @@ class MorayHook:
         if self._bpf_map_fd >= 0:
             os.close(self._bpf_map_fd)
             self._bpf_map_fd = -1
+        if self._bpf_xdp_fd >= 0:
+            os.close(self._bpf_xdp_fd)
+            self._bpf_xdp_fd = -1
 
     def _with_lock(self, func: Callable[[], T]) -> T:
         """Serialize map operations across processes and threads using POSIX file lock."""
         lock_path = f"{self.map_path}.lock"
         target_dir = os.path.dirname(self.map_path)
+        if target_dir:
+            os.makedirs(target_dir, exist_ok=True)
+        with open(lock_path, "w") as lock_f:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            try:
+                return func()
+            finally:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+
+    def _with_xdp_lock(self, func: Callable[[], T]) -> T:
+        """Serialize XDP map operations across processes and threads using POSIX file lock."""
+        lock_path = f"{self.xdp_map_path}.lock"
+        target_dir = os.path.dirname(self.xdp_map_path)
         if target_dir:
             os.makedirs(target_dir, exist_ok=True)
         with open(lock_path, "w") as lock_f:
@@ -766,11 +856,13 @@ class MorayHook:
         warnings: list[str] = []
         status: str = "healthy"
         map_accessible = False
+        xdp_accessible = False
         bpffs_mounted = False
         bpf_lsm_active = False
 
         if self.mock_mode:
             map_accessible = True
+            xdp_accessible = True
             bpffs_mounted = True
             bpf_lsm_active = True
         else:
@@ -779,6 +871,9 @@ class MorayHook:
             else:
                 warnings.append(f"Quarantine map pin not found: {self.map_path}")
                 status = "degraded"
+
+            if os.path.exists(self.xdp_map_path):
+                xdp_accessible = True
 
             if os.path.exists("/sys/fs/bpf"):
                 bpffs_mounted = True
@@ -810,9 +905,12 @@ class MorayHook:
             "mock_mode": self.mock_mode,
             "map_path": self.map_path,
             "map_accessible": map_accessible,
+            "xdp_map_path": self.xdp_map_path,
+            "xdp_accessible": xdp_accessible,
             "bpffs_mounted": bpffs_mounted,
             "bpf_lsm_active": bpf_lsm_active,
             "quarantined_count": len(self.list_quarantined()),
+            "xdp_dropped_count": len(self.xdp_list_dropped()),
             "warnings": warnings,
         }
 
@@ -948,6 +1046,249 @@ class MorayHook:
             raise MorayQuarantineError(f"bpf(BPF_MAP_DELETE_ELEM) failed: {os.strerror(err)}")
         return True
 
+    # -------------------------------------------------------------------------
+    # Phase 6.4: Wire-Level XDP Drop Map Lifecycle & Persistence
+    # -------------------------------------------------------------------------
+
+    def _sync_mock_xdp_file(self) -> None:
+        if os.path.islink(self.xdp_map_path):
+            raise MorayQuarantineError(
+                f"Symlink xdp map path rejected for security: {self.xdp_map_path}"
+            )
+
+        try:
+            target_dir = os.path.dirname(self.xdp_map_path)
+            if target_dir:
+                os.makedirs(target_dir, exist_ok=True)
+
+            tmp_path = (
+                f"{self.xdp_map_path}.tmp.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}"
+            )
+            with open(tmp_path, "wb") as f:
+                for raw_ip, flag in self._mock_xdp_table.items():
+                    f.write(raw_ip)  # 4 bytes in network wire order
+                    f.write(struct.pack("B", flag))  # 1 byte flag
+                f.flush()
+                os.fsync(f.fileno())
+
+            os.replace(tmp_path, self.xdp_map_path)
+        except OSError as exc:
+            raise MorayQuarantineError(f"Failed to sync mock xdp map: {exc}") from exc
+
+    def _load_mock_xdp_file(self) -> None:
+        if not os.path.exists(self.xdp_map_path):
+            return
+
+        if os.path.islink(self.xdp_map_path):
+            raise MorayQuarantineError(
+                f"Symlink xdp map path rejected for security: {self.xdp_map_path}"
+            )
+
+        try:
+            sz = os.path.getsize(self.xdp_map_path)
+            if sz > MAX_MAP_FILE_BYTES:
+                raise MorayQuarantineError(
+                    f"XDP map file size exceeds {MAX_MAP_FILE_BYTES} byte ceiling: {sz}"
+                )
+
+            with open(self.xdp_map_path, "rb") as f:
+                data = f.read(MAX_MAP_FILE_BYTES + 1)
+
+            if len(data) > MAX_MAP_FILE_BYTES:
+                raise MorayQuarantineError(
+                    f"XDP map payload exceeds {MAX_MAP_FILE_BYTES} byte ceiling: {len(data)}"
+                )
+
+            entry_sz = 5  # 4 bytes IPv4 + 1 byte flag
+            if len(data) % entry_sz != 0:
+                raise MorayQuarantineError(
+                    f"Corrupted XDP map: size {len(data)} is not a multiple of {entry_sz}"
+                )
+
+            count = len(data) // entry_sz
+            self._mock_xdp_table.clear()
+            for i in range(count):
+                chunk = data[i * entry_sz : (i + 1) * entry_sz]
+                raw_ip = chunk[:4]
+                flag = chunk[4]
+                self._mock_xdp_table[raw_ip] = flag
+        except OSError as exc:
+            raise MorayQuarantineError(f"Failed to load mock xdp map: {exc}") from exc
+
+    def _bpf_xdp_update_elem(self, raw_ip: bytes, flag: int) -> bool:
+        if self.mock_mode or self._bpf_xdp_fd < 0:
+            self._mock_xdp_table[raw_ip] = flag
+            self._sync_mock_xdp_file()
+            return True
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        k_buf = ctypes.create_string_buffer(raw_ip, 4)
+        v = ctypes.c_uint8(flag)
+        attr = BpfAttrMapElem(
+            map_fd=self._bpf_xdp_fd,
+            pad0=0,
+            key=ctypes.cast(k_buf, ctypes.c_void_p).value or 0,
+            value=ctypes.addressof(v),
+            flags=BPF_ANY,
+        )
+        nr = get_bpf_syscall_nr()
+        ret = libc.syscall(nr, BPF_MAP_UPDATE_ELEM, ctypes.byref(attr), ctypes.sizeof(attr))
+        if ret != 0:
+            err = ctypes.get_errno()
+            raise MorayQuarantineError(f"bpf(BPF_MAP_UPDATE_ELEM xdp) failed: {os.strerror(err)}")
+        return True
+
+    def _bpf_xdp_lookup_elem(self, raw_ip: bytes) -> int | None:
+        if self.mock_mode or self._bpf_xdp_fd < 0:
+            self._load_mock_xdp_file()
+            return self._mock_xdp_table.get(raw_ip)
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        k_buf = ctypes.create_string_buffer(raw_ip, 4)
+        v = ctypes.c_uint8()
+        attr = BpfAttrMapElem(
+            map_fd=self._bpf_xdp_fd,
+            pad0=0,
+            key=ctypes.cast(k_buf, ctypes.c_void_p).value or 0,
+            value=ctypes.addressof(v),
+            flags=0,
+        )
+        nr = get_bpf_syscall_nr()
+        ret = libc.syscall(nr, BPF_MAP_LOOKUP_ELEM, ctypes.byref(attr), ctypes.sizeof(attr))
+        if ret != 0:
+            err = ctypes.get_errno()
+            if err == 2:  # ENOENT
+                return None
+            raise MorayQuarantineError(f"bpf(BPF_MAP_LOOKUP_ELEM xdp) failed: {os.strerror(err)}")
+        return int(v.value)
+
+    def _bpf_xdp_delete_elem(self, raw_ip: bytes) -> bool:
+        if self.mock_mode or self._bpf_xdp_fd < 0:
+            self._load_mock_xdp_file()
+            if raw_ip in self._mock_xdp_table:
+                del self._mock_xdp_table[raw_ip]
+                self._sync_mock_xdp_file()
+                return True
+            return False
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        k_buf = ctypes.create_string_buffer(raw_ip, 4)
+        attr = BpfAttrMapElem(
+            map_fd=self._bpf_xdp_fd,
+            pad0=0,
+            key=ctypes.cast(k_buf, ctypes.c_void_p).value or 0,
+            value=0,
+            flags=0,
+        )
+        nr = get_bpf_syscall_nr()
+        ret = libc.syscall(nr, BPF_MAP_DELETE_ELEM, ctypes.byref(attr), ctypes.sizeof(attr))
+        if ret != 0:
+            err = ctypes.get_errno()
+            if err == 2:  # ENOENT
+                return False
+            raise MorayQuarantineError(f"bpf(BPF_MAP_DELETE_ELEM xdp) failed: {os.strerror(err)}")
+        return True
+
+    def xdp_drop_ip(self, ip_str: str, flag: int = 1) -> bool:
+        """
+        Add an IPv4 address to the wire-level XDP drop map (moray_xdp_drop_map).
+        Packets with matching source or destination IP will be discarded with XDP_DROP at line rate.
+        """
+        raw_ip = ip_to_wire_bytes(ip_str)
+        if not (1 <= flag <= 255):
+            raise MorayQuarantineError(f"XDP action flag must be between 1 and 255, got {flag}")
+
+        if self.mock_mode:
+
+            def _do_drop() -> bool:
+                self._load_mock_xdp_file()
+                self._mock_xdp_table[raw_ip] = flag
+                self._sync_mock_xdp_file()
+                return True
+
+            return self._with_xdp_lock(_do_drop)
+
+        if self._bpf_xdp_fd < 0 and os.path.exists(self.xdp_map_path):
+            self._open_bpf_xdp_map()
+        return self._bpf_xdp_update_elem(raw_ip, flag)
+
+    def xdp_remove_ip(self, ip_str: str) -> bool:
+        """
+        Remove an IPv4 address from the wire-level XDP drop map.
+        """
+        raw_ip = ip_to_wire_bytes(ip_str)
+        if self.mock_mode:
+
+            def _do_remove() -> bool:
+                self._load_mock_xdp_file()
+                if raw_ip in self._mock_xdp_table:
+                    del self._mock_xdp_table[raw_ip]
+                    self._sync_mock_xdp_file()
+                    return True
+                return False
+
+            return self._with_xdp_lock(_do_remove)
+
+        if self._bpf_xdp_fd < 0 and os.path.exists(self.xdp_map_path):
+            self._open_bpf_xdp_map()
+        return self._bpf_xdp_delete_elem(raw_ip)
+
+    def xdp_is_dropped(self, ip_str: str) -> bool:
+        """
+        Check if an IPv4 address is registered in the wire-level XDP drop map.
+        """
+        try:
+            raw_ip = ip_to_wire_bytes(ip_str)
+        except MorayQuarantineError:
+            return False
+
+        if self.mock_mode:
+
+            def _do_check() -> bool:
+                self._load_mock_xdp_file()
+                return raw_ip in self._mock_xdp_table
+
+            return self._with_xdp_lock(_do_check)
+
+        if self._bpf_xdp_fd < 0 and os.path.exists(self.xdp_map_path):
+            self._open_bpf_xdp_map()
+        val = self._bpf_xdp_lookup_elem(raw_ip)
+        return val is not None and val != 0
+
+    def xdp_list_dropped(self) -> list[str]:
+        """
+        List all dropped IPv4 addresses currently programmed in the XDP drop map.
+        """
+        if self.mock_mode:
+
+            def _do_list() -> list[str]:
+                self._load_mock_xdp_file()
+                return [wire_bytes_to_ip(raw) for raw in self._mock_xdp_table]
+
+            return self._with_xdp_lock(_do_list)
+        return []
+
+    def xdp_flush(self, force: bool = False) -> int:
+        """
+        Flush all entries from the XDP drop map. Requires force=True.
+        """
+        if not force:
+            raise MorayQuarantineError(
+                "XDP flush requires explicit confirmation (force=True / --force)."
+            )
+
+        if self.mock_mode:
+
+            def _do_flush() -> int:
+                self._load_mock_xdp_file()
+                count = len(self._mock_xdp_table)
+                self._mock_xdp_table.clear()
+                self._sync_mock_xdp_file()
+                return count
+
+            return self._with_xdp_lock(_do_flush)
+        return 0
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -1041,6 +1382,37 @@ def main() -> None:
         action="store_true",
         help="Emit a synthesized test event to the mock events log (requires --mock)",
     )
+    parser.add_argument(
+        "--xdp-drop-ip",
+        type=str,
+        help="Add an IPv4 address to the wire-level XDP drop map (XDP_DROP)",
+    )
+    parser.add_argument(
+        "--xdp-remove-ip",
+        type=str,
+        help="Remove an IPv4 address from the wire-level XDP drop map",
+    )
+    parser.add_argument(
+        "--xdp-check-ip",
+        type=str,
+        help="Check if an IPv4 address is in the wire-level XDP drop map",
+    )
+    parser.add_argument(
+        "--xdp-list",
+        action="store_true",
+        help="List all IPv4 addresses in the wire-level XDP drop map",
+    )
+    parser.add_argument(
+        "--xdp-flush",
+        action="store_true",
+        help="Purge all entries from the wire-level XDP drop map (requires --force)",
+    )
+    parser.add_argument(
+        "--xdp-map-path",
+        type=str,
+        default=DEFAULT_XDP_PIN,
+        help="Path to pinned XDP drop map or mock file",
+    )
     parser.add_argument("--mock", action="store_true", help="Force mock testing mode")
     parser.add_argument("--json", action="store_true", help="Format output as structured JSON")
 
@@ -1050,6 +1422,7 @@ def main() -> None:
         hook = MorayHook(
             map_path=args.map_path,
             events_path=args.events_path,
+            xdp_map_path=args.xdp_map_path,
             mock_mode=args.mock,
         )
 
@@ -1279,6 +1652,62 @@ def main() -> None:
                 print(json.dumps({"status": "emitted", "event": ev.to_dict()}))
             else:
                 print(f"[+] EMITTED MOCK EVENT: PID {pid} blocked at BPRM_CHECK_SECURITY")
+        elif args.xdp_drop_ip:
+            hook.xdp_drop_ip(args.xdp_drop_ip)
+            if args.json:
+                print(
+                    json.dumps(
+                        {"status": "xdp_dropped", "ip": args.xdp_drop_ip, "action": "XDP_DROP"}
+                    )
+                )
+            else:
+                print(
+                    f"[+] MORAY XDP WIRE DROP ASSERTED: IP {args.xdp_drop_ip} registered in moray_xdp_drop_map."
+                )
+        elif args.xdp_remove_ip:
+            removed = hook.xdp_remove_ip(args.xdp_remove_ip)
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "status": "removed" if removed else "not_found",
+                            "ip": args.xdp_remove_ip,
+                        }
+                    )
+                )
+            else:
+                if removed:
+                    print(
+                        f"[+] MORAY XDP WIRE RELEASE: IP {args.xdp_remove_ip} removed from drop map."
+                    )
+                else:
+                    print(f"[-] IP {args.xdp_remove_ip} was not found in XDP drop map.")
+        elif args.xdp_check_ip:
+            is_dropped = hook.xdp_is_dropped(args.xdp_check_ip)
+            if args.json:
+                print(json.dumps({"ip": args.xdp_check_ip, "xdp_dropped": is_dropped}))
+                sys.exit(1 if is_dropped else 0)
+            else:
+                if is_dropped:
+                    print(f"[!] IP {args.xdp_check_ip} is DROPPED at wire level (XDP_DROP).")
+                    sys.exit(1)
+                else:
+                    print(f"[+] IP {args.xdp_check_ip} is NOT dropped by XDP.")
+                    sys.exit(0)
+        elif args.xdp_list:
+            dropped_ips = hook.xdp_list_dropped()
+            if args.json:
+                print(json.dumps({"dropped_ips": dropped_ips, "count": len(dropped_ips)}, indent=2))
+            else:
+                print(f"[*] Total Wire-Dropped IPs: {len(dropped_ips)}")
+                for ip in dropped_ips:
+                    print(f"  {ip} -> XDP_DROP")
+        elif args.xdp_flush:
+            flushed = hook.xdp_flush(force=args.force)
+            if args.json:
+                print(json.dumps({"status": "xdp_flushed", "count": flushed}))
+            else:
+                print(f"[!] BREAK-GLASS XDP FLUSH: Purged {flushed} XDP drop entries.")
         else:
             parser.print_help()
 

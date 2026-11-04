@@ -228,7 +228,18 @@ int moray_xdp_filter(struct xdp_md *ctx)
     }
 
     __u8 *drop_flag = bpf_map_lookup_elem(&moray_xdp_drop_map, src_ip);
-    if (drop_flag && *drop_flag == 1) {
+    if (drop_flag && *drop_flag != 0) {
+        return XDP_DROP;
+    }
+
+    /* Extract IPv4 Destination Address (offset 14 ethernet + 16 ip header = 30) */
+    __u32 *dst_ip = (__u32 *)(data + 30);
+    if ((void *)(dst_ip + 1) > data_end) {
+        return XDP_PASS;
+    }
+
+    drop_flag = bpf_map_lookup_elem(&moray_xdp_drop_map, dst_ip);
+    if (drop_flag && *drop_flag != 0) {
         return XDP_DROP;
     }
 

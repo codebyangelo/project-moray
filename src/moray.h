@@ -34,6 +34,7 @@ typedef uint32_t __be32;
 #define MORAY_PIN_DIR           "/sys/fs/bpf/moray"
 #define MORAY_QUARANTINE_PIN    "/sys/fs/bpf/moray/quarantine_map"
 #define MORAY_EVENTS_PIN        "/sys/fs/bpf/moray/events"
+#define MORAY_XDP_DROP_PIN      "/sys/fs/bpf/moray/xdp_drop_map"
 
 /* Map Configuration Boundaries */
 #define MORAY_MAX_ENTRIES       1024

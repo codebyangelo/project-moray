@@ -24,10 +24,12 @@ Project Moray provides autonomous AI agent containment through hardware-enforced
 |                             LINUX KERNEL (RING 0)                             |
 |                                                                               |
 |  /sys/fs/bpf/moray/quarantine_map (BPF_MAP_TYPE_HASH, max 1024 entries)       |
-|  /sys/fs/bpf/moray/events         (BPF_MAP_TYPE_RINGBUF, 64 KB ceiling)      |
+|  /sys/fs/bpf/moray/events         (BPF_MAP_TYPE_RINGBUF, 256 KB bounded)     |
+|  /sys/fs/bpf/moray/xdp_drop_map   (BPF_MAP_TYPE_HASH, max 1024 entries)       |
 |                                                                               |
 |  [LSM Hook: bprm_check_security] ---------> Intercept execve (-EPERM/SIGKILL) |
-|  [LSM Hook: socket_create] ---------------> Intercept egress socket (-EPERM) |
+|  [LSM Hook: socket_connect] --------------> Intercept egress socket (-EPERM) |
+|  [XDP Driver Hook: moray_xdp_filter] -----> Line-rate packet drop (XDP_DROP) |
 +-------------------------------------------------------------------------------+
 ```
 
@@ -258,6 +260,44 @@ When containing an agent that must remain capable of communicating with a local 
    - `action_flags: 18` corresponds to `0x02` (`BLOCK_SOCKET`) | `0x10` (`ALLOW_LOOPBACK`).
    - `allow_loopback: true` confirms the kernel BPF-LSM hook exempts `AF_UNIX` and `127.0.0.0/8` / `::1`.
 
+### IR-06: Wire-Level XDP Frame Dropping & Network Interface Isolation
+When containing an agent attempting network exfiltration, raw socket bypasses, or C2 callback traffic to malicious IPv4 addresses:
+
+1. **Assert Line-Rate Wire Drop for Target IPv4 Destination/Source**:
+   ```bash
+   python3 bridge/lobster_hook.py --xdp-drop-ip 198.51.100.42
+   ```
+
+2. **Verify Programmed XDP Drop Rules**:
+   ```bash
+   python3 bridge/lobster_hook.py --xdp-list --json
+   ```
+   **Output Inspection**:
+   ```json
+   {
+     "dropped_ips": [
+       "198.51.100.42"
+     ],
+     "count": 1
+   }
+   ```
+
+3. **Check Specific IP Drop State**:
+   ```bash
+   python3 bridge/lobster_hook.py --xdp-check-ip 198.51.100.42 --json
+   # Exit code 1 indicates DROPPED; exit code 0 indicates BENIGN.
+   ```
+
+4. **Release Wire Drop Rule**:
+   ```bash
+   python3 bridge/lobster_hook.py --xdp-remove-ip 198.51.100.42
+   ```
+
+5. **Emergency Purge of All Wire Drops**:
+   ```bash
+   python3 bridge/lobster_hook.py --xdp-flush --force
+   ```
+
 ---
 
 ## 5. Disaster Recovery & Break-Glass Procedures
@@ -276,7 +316,7 @@ python3 /usr/local/bin/lobster-hook --flush-all --force --json
 *Note:* The `--force` flag is mandatory. Running `--flush-all` without `--force` immediately fails closed with exit code `252`.
 
 ### DR-02: Corrupted Map State Recovery
-If `/sys/fs/bpf/moray/quarantine_map` becomes corrupted due to abnormal hypervisor termination or filesystem failure:
+If `/sys/fs/bpf/moray/quarantine_map` or `/sys/fs/bpf/moray/xdp_drop_map` becomes corrupted due to abnormal hypervisor termination or filesystem failure:
 
 1. **Stop the Daemon**:
    ```bash
@@ -287,6 +327,7 @@ If `/sys/fs/bpf/moray/quarantine_map` becomes corrupted due to abnormal hypervis
    ```bash
    rm -f /sys/fs/bpf/moray/quarantine_map
    rm -f /sys/fs/bpf/moray/events
+   rm -f /sys/fs/bpf/moray/xdp_drop_map
    ```
 
 3. **Restart the Daemon**:

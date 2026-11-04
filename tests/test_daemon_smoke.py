@@ -38,12 +38,13 @@ class TestDaemonSmokeLifecycle:
         assert res.returncode == 0
         assert "Usage:" in res.stdout
         assert "--mock" in res.stdout
+        assert "--iface" in res.stdout
 
     def test_daemon_mock_lifecycle_and_sigterm(self, daemon_bin: Path, tmp_path: Path) -> None:
-        """Daemon starts in mock mode, pins mock map, and terminates cleanly on SIGTERM."""
+        """Daemon starts in mock mode, pins mock maps (quarantine and xdp), and terminates cleanly."""
         mock_pin_dir = tmp_path / "moray_smoke_pin"
         proc = subprocess.Popen(
-            [str(daemon_bin), "--mock", str(mock_pin_dir)],
+            [str(daemon_bin), "--mock", str(mock_pin_dir), "--iface", "lo"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -54,10 +55,14 @@ class TestDaemonSmokeLifecycle:
             time.sleep(0.3)
             assert proc.poll() is None, "Daemon exited prematurely"
 
-            # Verify mock map file was created
+            # Verify mock map files were created
             quarantine_map = mock_pin_dir / "quarantine_map"
             assert quarantine_map.exists(), "quarantine_map was not pinned"
             assert quarantine_map.stat().st_size > 0, "quarantine_map was not preallocated"
+
+            xdp_map = mock_pin_dir / "xdp_drop_map"
+            assert xdp_map.exists(), "xdp_drop_map was not pinned"
+            assert xdp_map.stat().st_size > 0, "xdp_drop_map was not preallocated"
 
             # Deliver SIGTERM for graceful shutdown
             proc.send_signal(signal.SIGTERM)

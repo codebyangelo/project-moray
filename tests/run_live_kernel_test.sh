@@ -44,7 +44,7 @@ echo "[*] Step 5: Launching morayd loader daemon in live Ring 0 mode..."
 rm -rf /sys/fs/bpf/moray
 mkdir -p /sys/fs/bpf/moray
 
-./bin/morayd --pin-dir /sys/fs/bpf/moray --bpf-obj build/moray_kern.bpf.o > /tmp/morayd_live.log 2>&1 &
+./bin/morayd --pin-dir /sys/fs/bpf/moray --bpf-obj build/moray_kern.bpf.o --iface lo > /tmp/morayd_live.log 2>&1 &
 DAEMON_PID=$!
 sleep 2
 
@@ -57,12 +57,18 @@ fi
 echo "[+] morayd is running (PID: $DAEMON_PID)."
 cat /tmp/morayd_live.log
 
-# Verify real BPF map pin
+# Verify real BPF map pins
 if [ ! -e /sys/fs/bpf/moray/quarantine_map ]; then
     echo "[-] FATAL: /sys/fs/bpf/moray/quarantine_map was not pinned!"
     exit 1
 fi
 echo "[+] Verified pinned BPF map: $(ls -l /sys/fs/bpf/moray/quarantine_map)"
+
+if [ ! -e /sys/fs/bpf/moray/xdp_drop_map ]; then
+    echo "[-] FATAL: /sys/fs/bpf/moray/xdp_drop_map was not pinned!"
+    exit 1
+fi
+echo "[+] Verified pinned XDP map: $(ls -l /sys/fs/bpf/moray/xdp_drop_map)"
 
 # 6. Test Live Syscall Interception (execve denial)
 echo "[*] Step 6: Testing live execve() interception via Ring 0 BPF-LSM..."
@@ -221,8 +227,32 @@ if [ "$RET_DENY" -ne 48 ]; then
 fi
 echo "[+] EMPIRICAL PROOF: Total network block severed loopback socket with -EPERM!"
 
-# 13. Clean Teardown
-echo "[*] Step 13: Terminating morayd..."
+# 13. Test Live Wire-Level XDP Drop Map Programming
+echo "[*] Step 13: Testing live XDP drop map registration and inspection..."
+python3 bridge/lobster_hook.py --xdp-drop-ip 198.51.100.1 --xdp-map-path /sys/fs/bpf/moray/xdp_drop_map --json
+echo "[+] Programmed wire-level XDP drop for 198.51.100.1 in live kernel"
+
+# Assert check reports dropped (exit code 1)
+XDP_CHECK_RET=0
+python3 bridge/lobster_hook.py --xdp-check-ip 198.51.100.1 --xdp-map-path /sys/fs/bpf/moray/xdp_drop_map || XDP_CHECK_RET=$?
+if [ "$XDP_CHECK_RET" -ne 1 ]; then
+    echo "[-] FATAL: XDP dropped IP was not recognized by live map check!"
+    exit 1
+fi
+echo "[+] EMPIRICAL PROOF: Live in-kernel XDP drop map registered and verified target IP!"
+
+# Assert removal
+python3 bridge/lobster_hook.py --xdp-remove-ip 198.51.100.1 --xdp-map-path /sys/fs/bpf/moray/xdp_drop_map --json
+XDP_CHECK_POST=0
+python3 bridge/lobster_hook.py --xdp-check-ip 198.51.100.1 --xdp-map-path /sys/fs/bpf/moray/xdp_drop_map || XDP_CHECK_POST=$?
+if [ "$XDP_CHECK_POST" -ne 0 ]; then
+    echo "[-] FATAL: XDP dropped IP was still present after removal!"
+    exit 1
+fi
+echo "[+] EMPIRICAL PROOF: Live in-kernel XDP drop map successfully removed target IP!"
+
+# 14. Clean Teardown
+echo "[*] Step 14: Terminating morayd..."
 kill -TERM "$DAEMON_PID"
 sleep 1
 
