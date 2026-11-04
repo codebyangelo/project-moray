@@ -1711,6 +1711,11 @@ def main() -> None:
         help="Assert immediate anti-tamper quarantine on target PID (reason=TAMPER_ATTEMPT)",
     )
     parser.add_argument(
+        "--block-exec",
+        action="store_true",
+        help="Strike target PID or cgroup with execution block (MORAY_ACT_BLOCK_EXEC)",
+    )
+    parser.add_argument(
         "--block-wan",
         action="store_true",
         help="Strike target PID with granular WAN egress block (permitting loopback/IPC)",
@@ -1896,7 +1901,9 @@ def main() -> None:
                 )
         elif args.quarantine_cgroup:
             action = args.action
-            if args.block_wan:
+            if args.block_exec:
+                action = MORAY_ACT_BLOCK_EXEC
+            elif args.block_wan:
                 action = MORAY_ACT_BLOCK_SOCKET | MORAY_ACT_ALLOW_LOOPBACK
             elif args.deny_all_net:
                 action = MORAY_ACT_BLOCK_SOCKET | MORAY_ACT_DROP_NET
@@ -1991,6 +1998,28 @@ def main() -> None:
                 print(json.dumps({"status": "cgroups_flushed", "count": flushed}))
             else:
                 print(f"[!] BREAK-GLASS CGROUP FLUSH: Purged {flushed} quarantined cgroups.")
+        elif args.block_exec:
+            if not args.pid:
+                parser.error("--block-exec requires --pid <PID>")
+            action = MORAY_ACT_BLOCK_EXEC
+            hook.strike(args.pid, action_flags=action, reason=args.reason, ttl_seconds=args.ttl)
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "status": "asserted",
+                            "policy": "block-exec",
+                            "pid": args.pid,
+                            "action_flags": action,
+                            "ttl_seconds": args.ttl,
+                        }
+                    )
+                )
+            else:
+                ttl_msg = f" (TTL: {args.ttl}s)" if args.ttl > 0 else " (Permanent)"
+                print(
+                    f"[+] MORAY EXECUTION POLICY ASSERTED: PID {args.pid} blocked from execve{ttl_msg}."
+                )
         elif args.block_wan:
             if not args.pid:
                 parser.error("--block-wan requires --pid <PID>")

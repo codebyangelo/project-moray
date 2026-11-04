@@ -302,6 +302,31 @@ class TestCgroupCliVerbs:
         data_r = json.loads(res_r.stdout)
         assert data_r["status"] == "released"
 
+    def test_cli_quarantine_block_exec(self, tmp_path: Path) -> None:
+        mock_map = tmp_path / "cli_block_exec_cgroup.bin"
+
+        res = subprocess.run(
+            [
+                sys.executable,
+                "bridge/lobster_hook.py",
+                "--quarantine-cgroup",
+                "7777",
+                "--cgroup-map-path",
+                str(mock_map),
+                "--block-exec",
+                "--mock",
+                "--json",
+            ],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        data = json.loads(res.stdout)
+        assert data["status"] == "asserted"
+        assert data["cgroup_id"] == 7777
+        assert data["action_flags"] == MORAY_ACT_BLOCK_EXEC
+
     def test_cli_flush_without_force_fails(self, tmp_path: Path) -> None:
         mock_map = tmp_path / "cli_flush.bin"
 
