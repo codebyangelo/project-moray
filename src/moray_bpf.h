@@ -65,6 +65,17 @@ ____##name(unsigned long long *ctx, ##args)
 #define BPF_MAP_TYPE_RINGBUF 27
 #endif
 
+/* BPF Map Update Flags */
+#ifndef BPF_ANY
+#define BPF_ANY 0
+#endif
+#ifndef BPF_NOEXIST
+#define BPF_NOEXIST 1
+#endif
+#ifndef BPF_EXIST
+#define BPF_EXIST 2
+#endif
+
 /* XDP Actions */
 #ifndef XDP_DROP
 #define XDP_DROP 1

@@ -68,6 +68,10 @@ class TestDaemonSmokeLifecycle:
             assert cgroup_map.exists(), "cgroup_map was not pinned"
             assert cgroup_map.stat().st_size > 0, "cgroup_map was not preallocated"
 
+            boundary_map = mock_pin_dir / "boundary_map"
+            assert boundary_map.exists(), "boundary_map was not pinned"
+            assert boundary_map.stat().st_size > 0, "boundary_map was not preallocated"
+
             # Deliver SIGTERM for graceful shutdown
             proc.send_signal(signal.SIGTERM)
             stdout, _ = proc.communicate(timeout=3)
@@ -95,3 +99,34 @@ class TestDaemonSmokeLifecycle:
         )
         assert res.returncode != 0
         assert "Cannot access or create pin directory" in res.stderr
+
+    def test_daemon_auto_harden_flag(self, daemon_bin: Path, tmp_path: Path) -> None:
+        """Daemon accepts --auto-harden and initializes boundary defense."""
+        manifest = tmp_path / "moray_boundary.json"
+        manifest.write_text(
+            '{"boundary_policy": {"allowed_comms": ["python3", "morayd"], "network_posture": "ALLOW_LOOPBACK"}}'
+        )
+
+        mock_pin_dir = tmp_path / "moray_auto_pin"
+        proc = subprocess.Popen(
+            [str(daemon_bin), "--mock", str(mock_pin_dir), "--auto-harden", str(manifest)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        try:
+            time.sleep(0.3)
+            assert proc.poll() is None, "Daemon exited prematurely"
+
+            boundary_map = mock_pin_dir / "boundary_map"
+            assert boundary_map.exists(), "boundary_map was not pinned"
+
+            proc.send_signal(signal.SIGTERM)
+            stdout, _ = proc.communicate(timeout=3)
+            assert proc.returncode == 0
+            assert "PROJECT MORAY" in stdout
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()

@@ -40,6 +40,16 @@ int main(void) {
     assert(offsetof(struct moray_event, drop_count) == 112);
     assert(offsetof(struct moray_event, reserved) == 120);
 
+    /* Verify moray_boundary_entry */
+    printf("[-] sizeof(struct moray_boundary_entry) = %zu\n", sizeof(struct moray_boundary_entry));
+    assert(sizeof(struct moray_boundary_entry) == 16);
+    assert(offsetof(struct moray_boundary_entry, perm_flags) == 0);
+    assert(offsetof(struct moray_boundary_entry, reserved) == 4);
+    assert(offsetof(struct moray_boundary_entry, hit_count) == 8);
+    assert(MORAY_PERM_EXEC == 0x01);
+    assert(MORAY_PERM_SOCKET == 0x02);
+    assert(MORAY_PERM_ALL == 0xFF);
+
     printf("[+] All struct layout and alignment assertions PASSED cleanly.\n");
     return 0;
 }
