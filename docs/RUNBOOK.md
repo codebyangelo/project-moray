@@ -18,26 +18,34 @@ Project Moray provides autonomous AI agent containment through hardware-enforced
 |         |                              |                          |           |
 |         v                              v                          v           |
 |  (Untrusted PID) -------------> [lobster_hook.py] <----> [systemd / morayd]   |
+|                                        |                  [moray_profiler.py] |
+|                                        |                  [moray_boundary.json|
 +----------------------------------------|--------------------------|-----------+
                                          | (bpf syscall / ctypes)   |
 =========================================v==========================v============
 |                             LINUX KERNEL (RING 0)                             |
 |                                                                               |
 |  /sys/fs/bpf/moray/quarantine_map (BPF_MAP_TYPE_HASH, max 1024 entries)       |
+|  /sys/fs/bpf/moray/cgroup_map     (BPF_MAP_TYPE_HASH, max 1024 entries)       |
+|  /sys/fs/bpf/moray/boundary_map   (BPF_MAP_TYPE_HASH, max 1024 entries)       |
 |  /sys/fs/bpf/moray/events         (BPF_MAP_TYPE_RINGBUF, 256 KB bounded)     |
 |  /sys/fs/bpf/moray/xdp_drop_map   (BPF_MAP_TYPE_HASH, max 1024 entries)       |
 |                                                                               |
 |  [LSM Hook: bprm_check_security] ---------> Intercept execve (-EPERM/SIGKILL) |
 |  [LSM Hook: socket_connect] --------------> Intercept egress socket (-EPERM) |
+|  [LSM Hook: bpf (Anti-Tamper)] -----------> Intercept sys_bpf (-EPERM)        |
 |  [XDP Driver Hook: moray_xdp_filter] -----> Line-rate packet drop (XDP_DROP) |
 +-------------------------------------------------------------------------------+
 ```
 
 ### Component Inventory
-1. **`bin/morayd`**: The userspace loader daemon. Executes kernel preflight checks, mounts `/sys/fs/bpf`, loads BPF-LSM programs, pins kernel maps to `/sys/fs/bpf/moray`, and handles signal termination.
-2. **`build/moray_kern.bpf.o`**: Restricted C bytecode executing in Ring 0. Intercepts `execve` and `socket` syscalls from quarantined processes, tracks strike counts atomically, and dispatches ringbuf telemetry.
-3. **`bridge/lobster_hook.py`**: Zero-dependency Python ctypes bridge. Provides fail-closed strike asserting, TTL auto-expiry checking, structured JSON telemetry querying, and healthcheck probes.
-4. **`packaging/systemd/morayd.service`**: Production systemd service unit providing sandboxed, least-privilege daemon management.
+1. **`bin/morayd`**: The userspace loader daemon. Executes kernel preflight checks, mounts `/sys/fs/bpf`, loads BPF-LSM programs, seeds autonomous boundary policies via `--auto-harden`, pins kernel maps to `/sys/fs/bpf/moray`, and handles signal termination.
+2. **`build/moray_kern.bpf.o`**: Restricted C bytecode executing in Ring 0. Intercepts `execve`, `socket`, and `bpf` syscalls from quarantined processes, tracks strike counts atomically, enforces autonomous boundary whitelists, and dispatches ringbuf telemetry.
+3. **`bridge/lobster_hook.py`**: Zero-dependency Python ctypes bridge for Project Lobster. Provides fail-closed strike asserting, cgroup v2 containment, TTL auto-expiry checking, and structured JSON telemetry querying.
+4. **`bridge/moray_profiler.py`**: Sovereign, zero-dependency workspace inspector and boundary policy synthesizer. Generates machine-readable `moray_boundary.json` manifests.
+5. **`bridge/moray_hook.py`**: Native sovereign Python bridge and NDJSON telemetry streaming consumer for Project Moray.
+6. **`moray_boundary.json`**: Standardized machine-readable boundary policy manifest defining permitted executables, network posture, and default containment action.
+7. **`packaging/systemd/morayd.service`**: Production systemd service unit providing sandboxed, least-privilege daemon management.
 
 ---
 
@@ -410,6 +418,45 @@ If the daemon is unresponsive and kernel LSM hooks must be detached immediately 
    dmesg | tail -n 20
    ```
 
+### IR-08: Autonomous Boundary Tuning & Emergency Overrides
+If `morayd` is running in autonomous zero-configuration mode (`--auto-harden`) and a legitimate toolchain binary (e.g. `gdb`, `perf`, `strace`, or a freshly deployed worker script) is unexpectedly blocked with `Operation not permitted (-EPERM)`:
+
+1. **Verify Root Cause in In-Kernel Telemetry**:
+   Check `/sys/fs/bpf/moray/events` ringbuf for `BPRM_CHECK_SECURITY` violations:
+   ```bash
+   python3 bridge/moray_hook.py --poll --count 5
+   ```
+   If `action_taken` is `1` (`MORAY_ACT_BLOCK_EXEC`) and the process is not in the manual `quarantine_map`, the failure is triggered by the autonomous boundary engine rejecting an unlisted `comm`.
+
+2. **Resolution A: Permanent Workspace Manifest Update**:
+   Re-profile the target workspace using `moray_profiler.py` or manually append the executable name to `moray_boundary.json`:
+   ```bash
+   # Automatically re-profile workspace
+   python3 bridge/moray_profiler.py . --output moray_boundary.json
+   
+   # Restart daemon to reload boundary map
+   systemctl restart morayd.service
+   ```
+
+3. **Resolution B: Live Hot-Patching (Zero-Downtime Injection)**:
+   Inject the new executable `comm` (e.g. `perf`) directly into the pinned in-kernel boundary map without restarting `morayd`:
+   ```bash
+   # Add key to pinned boundary_map with MORAY_PERM_ALL (0x07)
+   # Key: 16 bytes (hex), Value: 16 bytes struct moray_boundary_entry
+   bpftool map update pinned /sys/fs/bpf/moray/boundary_map \
+       key hex 70 65 72 66 00 00 00 00 00 00 00 00 00 00 00 00 \
+       value hex 07 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+   ```
+
+4. **Resolution C: Break-Glass Autonomous Override (Instant Disarm)**:
+   If autonomous enforcement must be deactivated immediately without killing `morayd` or flushing active manual quarantines, delete the sentinel key `"__moray_auto__"` from the pinned boundary map:
+   ```bash
+   # Delete sentinel key '__moray_auto__' (16 bytes hex: 5f 5f 6d 6f 72 61 79 5f 61 75 74 6f 5f 5f 00 00)
+   bpftool map delete pinned /sys/fs/bpf/moray/boundary_map \
+       key hex 5f 5f 6d 6f 72 61 79 5f 61 75 74 6f 5f 5f 00 00
+   ```
+   *Result:* Invariant $I_9$ sentinel is removed. Ring 0 LSM instantly falls back to standard manual quarantine mode ($I_1$), restoring benign unimpeded execution ($I_2$) across all non-flagged binaries in $O(1)$ time.
+
 ---
 
 ## 6. Post-Incident Forensic Data Collection
@@ -449,5 +496,6 @@ All production environments running Project Moray must pass this gate before unt
 - [ ] `morayd --preflight` exits cleanly with `0`.
 - [ ] `systemctl is-active morayd.service` returns `active`.
 - [ ] `lobster-hook --healthcheck` returns `healthy`.
-- [ ] All 55 test cases in `make verify` pass cleanly under local CI.
+- [ ] All 141 test cases in `make verify` pass cleanly under local CI.
+- [ ] All 46 live Ring 0 verification steps pass cleanly under KVM microVM (`tests/run_live_kernel_test.sh`).
 - [ ] Break-glass procedures (`--flush-all --force`) tested in staging environment.
