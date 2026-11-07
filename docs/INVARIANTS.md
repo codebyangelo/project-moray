@@ -60,6 +60,12 @@ This document codifies the core architectural invariants of Project Moray (`mora
 * **Enforcement Point**: `moray_kern.bpf.c` (`SEC("lsm/socket_connect")`) and `bridge/lobster_hook.py`.
 * **Verification**: `tests/test_network_policy.py` and `tests/run_live_kernel_test.sh` (Steps 10, 11, 12).
 
+### Invariant 9: Autonomous Boundary Enforcement & Sentinel State ($I_9$)
+* **Definition**: When `--auto-harden` is explicitly asserted on `morayd`, `moray_boundary_map` is populated with a sentinel entry (`"__moray_auto__"`) and an authorized executable whitelist. When the sentinel is present, any process invoking `execve` whose calling executable name (`comm`) is NOT registered in `moray_boundary_map` with `MORAY_PERM_EXEC` MUST be immediately severed with `-EPERM` and autonomously quarantined in Ring 0 without waiting for user-space intervention.
+* **Opt-In Invariant**: When `--auto-harden` is omitted, the sentinel `"__moray_auto__"` MUST NOT be inserted. In this unseeded state, unquarantined processes pass unimpeded ($O(1)$ fast path under $I_2$), preserving the fail-safe boundary and preventing unintentional system-wide execution blocking.
+* **Enforcement Point**: `moray_bprm_strike` in `src/moray_kern.bpf.c` and `seed_boundary_manifest()` in `src/morayd.c`.
+* **Verification**: `tests/test_autonomous_boundary_e2e.py` and `tests/test_struct_layout.c` (verifying 16-byte boundary struct layout).
+
 ---
 
 ## 📊 Invariant Verification Matrix
@@ -69,10 +75,11 @@ This document codifies the core architectural invariants of Project Moray (`mora
 | **$I_1$ (Syscall)** | `moray_kern.bpf.c`, `lobster_hook.py` | `tests/test_lobster_hook.py`, `tests/run_live_kernel_test.sh` | Syscall blocked (`-EPERM`), bridge returns `-4` on fault. |
 | **$I_1$ (Cgroup)** | `moray_kern.bpf.c` (LSM), `lobster_hook.py` | `tests/test_cgroup_containment.py`, `tests/run_live_kernel_test.sh` | Process within quarantined cgroup v2 subtree blocked with `-EPERM`. |
 | **$I_1$ (Wire)** | `moray_kern.bpf.c` (XDP), `lobster_hook.py` | `tests/test_xdp_filter.py`, `tests/run_live_kernel_test.sh` | IPv4 matching `moray_xdp_drop_map` dropped via `XDP_DROP` at line rate. |
-| **$I_2$** | `moray_kern.bpf.c` | `tests/victim_worker.c` (Step 4) | Benign execution succeeds unimpeded via $O(1)$ fast path without locks or allocations. |
+| **$I_2$** | `moray_kern.bpf.c` | `tests/victim_worker.c` (Step 4, Step 20) | Benign execution succeeds unimpeded via $O(1)$ fast path without locks or allocations. |
 | **$I_3$** | `lsm/bpf` | `tests/test_anti_tamper.py`, `tests/run_live_kernel_test.sh` | Block `sys_bpf` from quarantined PID with `-EPERM`. |
 | **$I_4$** | `src/moray.h`, `tests/` | `tests/test_struct_layout.c`, `tests/test_adversarial.py` | Static assertions `sizeof(struct moray_event) == 128` and 64KB heap ceiling clamp. |
 | **$I_5$** | `src/moray.h`, `lobster_hook.py` | `tests/test_struct_layout.c` | Struct offsets match Python `ctypes.sizeof()` across architectures. |
 | **$I_6$** | Repository Git history | Differential CI check | Zero synthetic commit hashes or ungrounded claims. |
 | **$I_7$** | `lsm/bpf`, `lobster_hook.py` | `tests/test_anti_tamper.py`, `tests/run_live_kernel_test.sh` | Quarantined PID calling `sys_bpf` receives `-EPERM`; `--report-tamper` asserts strike. |
 | **$I_8$** | `lsm/socket_connect` | `tests/test_network_policy.py`, `tests/run_live_kernel_test.sh` | External WAN blocked with `-EPERM`; loopback/IPC allowed when flag asserted. |
+| **$I_9$** | `moray_boundary_map`, `morayd.c` | `tests/test_autonomous_boundary_e2e.py` | Unlisted binary blocked with `-EPERM`; authorized binaries pass with zero-latency overhead. |

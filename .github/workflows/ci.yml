@@ -71,4 +71,15 @@ jobs:
             --append "lsm=landlock,lockdown,yama,bpf" \
             --user root \
             --cwd "$PWD" \
-            --exec "$PWD/tests/run_live_kernel_test.sh"
+            --exec "$PWD/tests/run_live_kernel_test.sh" 2>&1 | tee kvm_microvm_test.log
+
+    - name: Archive KVM Execution Logs & Diagnostics
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: kvm-microvm-verification-logs
+        path: |
+          kvm_microvm_test.log
+          /tmp/morayd_live.log
+          /tmp/morayd_relaunch.log
+        if-no-files-found: ignore
