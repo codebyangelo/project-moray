@@ -49,6 +49,17 @@ struct {
     __type(value, struct moray_quarantine_entry);
 } moray_cgroup_map SEC(".maps");
 
+/* Autonomous Boundary Map seeded by Project Octopus
+ * Key: Executable Name (comm, 16 bytes)
+ * Value: struct moray_boundary_entry (16 bytes)
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MORAY_MAX_ENTRIES);
+    __type(key, char[MORAY_COMM_LEN]);
+    __type(value, struct moray_boundary_entry);
+} moray_boundary_map SEC(".maps");
+
 /*
  * Invariant I_1: Look up quarantine entry for current task.
  * 1. Checks process TGID.
@@ -126,6 +137,33 @@ int BPF_PROG(moray_bprm_strike, struct linux_binprm *bprm)
         return -1; /* -EPERM */
     }
 
+    /* 2. Autonomous Boundary Defense (Zero-Configuration Mode) */
+    char sentinel_key[MORAY_COMM_LEN] = "__moray_auto__";
+    struct moray_boundary_entry *sentinel = bpf_map_lookup_elem(&moray_boundary_map, sentinel_key);
+    if (sentinel) {
+        char comm[MORAY_COMM_LEN] = {};
+        bpf_get_current_comm(comm, sizeof(comm));
+
+        struct moray_boundary_entry *b_entry = bpf_map_lookup_elem(&moray_boundary_map, comm);
+        if (b_entry && (b_entry->perm_flags & MORAY_PERM_EXEC)) {
+            __sync_fetch_and_add(&b_entry->hit_count, 1);
+            return 0; /* Permitted executable: O(1) Fast-Path (Invariant I_2) */
+        }
+
+        /* Unlisted binary execution: autonomous strike and quarantine */
+        struct moray_quarantine_entry auto_strike = {};
+        auto_strike.action_flags = MORAY_ACT_BLOCK_EXEC | MORAY_ACT_BLOCK_SOCKET;
+        auto_strike.reason = MORAY_REASON_EXEC_VIOLATION;
+        auto_strike.timestamp_ns = bpf_ktime_get_ns();
+        auto_strike.strike_count = 1;
+        auto_strike.ttl_seconds = 0;
+
+        bpf_map_update_elem(&moray_quarantine_map, &tgid, &auto_strike, BPF_ANY);
+        bpf_printk("MORAY AUTO-STRIKE: Intercepted unlisted binary '%s' (PID %d)\n", comm, tgid);
+        emit_strike_event(pid, tgid, auto_strike.action_flags, -1, MORAY_HOOK_BPRM, 1);
+        return -1; /* -EPERM */
+    }
+
     return 0;
 }
 
@@ -185,6 +223,53 @@ int BPF_PROG(moray_socket_strike, struct socket *sock, struct sockaddr *address,
         if ((entry->action_flags & MORAY_ACT_KILL) || hits >= MORAY_STRIKE_TIER3) {
             bpf_send_signal(9); /* SIGKILL */
         }
+        return -1; /* -EPERM */
+    }
+
+    /* 2. Autonomous Network Boundary Enforcement */
+    char sentinel_key[MORAY_COMM_LEN] = "__moray_auto__";
+    struct moray_boundary_entry *sentinel = bpf_map_lookup_elem(&moray_boundary_map, sentinel_key);
+    if (sentinel && !(sentinel->perm_flags & MORAY_PERM_SOCKET) && address && addrlen > 0) {
+        /* Default network posture is ALLOW_LOOPBACK: check if target address is loopback */
+        sa_family_t family = 0;
+        if (bpf_probe_read_kernel(&family, sizeof(family), &address->sa_family) == 0) {
+            if (family == AF_UNIX) {
+                return 0; /* Loopback UNIX socket allowed */
+            }
+            if (family == AF_INET && addrlen >= sizeof(struct sockaddr_in)) {
+                struct sockaddr_in in = {};
+                if (bpf_probe_read_kernel(&in, sizeof(in), address) == 0) {
+                    __u32 host_ip = bpf_ntohl(in.sin_addr.s_addr);
+                    if ((host_ip & 0xFF000000) == 0x7F000000) {
+                        return 0; /* Loopback IPv4 allowed */
+                    }
+                }
+            }
+            if (family == AF_INET6 && addrlen >= sizeof(struct sockaddr_in6)) {
+                struct sockaddr_in6 in6 = {};
+                if (bpf_probe_read_kernel(&in6, sizeof(in6), address) == 0) {
+                    if (in6.sin6_addr.in6_u.u6_addr32[0] == 0 &&
+                        in6.sin6_addr.in6_u.u6_addr32[1] == 0 &&
+                        in6.sin6_addr.in6_u.u6_addr32[2] == 0 &&
+                        in6.sin6_addr.in6_u.u6_addr32[3] == bpf_htonl(1)) {
+                        return 0; /* Loopback IPv6 allowed */
+                    }
+                }
+            }
+        }
+
+        /* Non-loopback WAN connection attempt: check if binary has explicit socket permission */
+        char comm[MORAY_COMM_LEN] = {};
+        bpf_get_current_comm(comm, sizeof(comm));
+        struct moray_boundary_entry *b_entry = bpf_map_lookup_elem(&moray_boundary_map, comm);
+        if (b_entry && (b_entry->perm_flags & MORAY_PERM_SOCKET)) {
+            __sync_fetch_and_add(&b_entry->hit_count, 1);
+            return 0; /* Permitted WAN socket */
+        }
+
+        /* WAN socket severed under autonomous boundary */
+        bpf_printk("MORAY AUTO-STRIKE: WAN socket connect severed for '%s' (PID %d)\n", comm, tgid);
+        emit_strike_event(pid, tgid, MORAY_ACT_BLOCK_SOCKET, -1, MORAY_HOOK_SOCKET, 1);
         return -1; /* -EPERM */
     }
 

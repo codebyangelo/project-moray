@@ -36,6 +36,7 @@ typedef uint32_t __be32;
 #define MORAY_EVENTS_PIN        "/sys/fs/bpf/moray/events"
 #define MORAY_XDP_DROP_PIN      "/sys/fs/bpf/moray/xdp_drop_map"
 #define MORAY_CGROUP_PIN        "/sys/fs/bpf/moray/cgroup_map"
+#define MORAY_BOUNDARY_PIN      "/sys/fs/bpf/moray/boundary_map"
 
 /* Map Configuration Boundaries */
 #define MORAY_MAX_ENTRIES       1024
@@ -50,6 +51,12 @@ typedef uint32_t __be32;
 #define MORAY_ACT_KILL          0x08U  /* Signal immediate termination */
 #define MORAY_ACT_ALLOW_LOOPBACK 0x10U /* Granular policy: Allow AF_UNIX and 127.0.0.1/::1 */
 #define MORAY_ACT_FULL_STRIKE   0xFFU  /* Full containment shutdown */
+
+/* Boundary Permission Flags (Autonomous Mode) */
+#define MORAY_PERM_NONE         0x00U
+#define MORAY_PERM_EXEC         0x01U  /* Allowed process execution */
+#define MORAY_PERM_SOCKET       0x02U  /* Allowed outbound network socket */
+#define MORAY_PERM_ALL          0xFFU  /* Full execution & network permission */
 
 /* Strike Reason Codes */
 #define MORAY_REASON_UNKNOWN          0U
@@ -106,9 +113,21 @@ struct moray_event {
     __u64 reserved;                     /* Explicit 8-byte alignment padding */
 };
 
+/*
+ * Autonomous Boundary Map Entry Value
+ * Key: char comm[MORAY_COMM_LEN] (16 bytes)
+ * Total size: 16 bytes (8-byte aligned)
+ */
+struct moray_boundary_entry {
+    __u32 perm_flags;   /* Bitmask of MORAY_PERM_* */
+    __u32 reserved;     /* Alignment padding */
+    __u64 hit_count;    /* Cumulative allowed operations counter */
+};
+
 #if !defined(__KERNEL__) && defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(sizeof(struct moray_quarantine_entry) == 24, "moray_quarantine_entry must be 24 bytes");
 _Static_assert(sizeof(struct moray_event) == 128, "moray_event must be 128 bytes");
+_Static_assert(sizeof(struct moray_boundary_entry) == 16, "moray_boundary_entry must be 16 bytes");
 #endif
 
 #endif /* _MORAY_H_ */
