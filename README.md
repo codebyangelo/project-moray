@@ -17,30 +17,30 @@ Project Moray (`morayd`) is an ultra-lightweight, zero-dependency in-kernel cont
 
 ```mermaid
 graph TD
-    subgraph Layer 7: User Space & Workspace
-        L[Project Lobster: L7 Proxy] -->|Detect Anomaly / Invariant Violation| B[lobster_hook.py]
-        O[Project Octopus: Auditor] -.->|Cross-Repo Compliance Audit| S[SARIF 2.1.0 Reports]
-        P[moray_profiler.py] -->|Inspect Workspace AST & Toolchains| J[moray_boundary.json]
-        J -->|--auto-harden| D[morayd Loader Daemon]
+    subgraph UserSpace ["Layer 7: User Space & Workspace"]
+        L["Project Lobster: L7 Proxy"] -->|Detect Anomaly / Invariant Violation| B["lobster_hook.py"]
+        O["Project Octopus: Auditor"] -.->|Cross-Repo Compliance Audit| S["SARIF 2.1.0 Reports"]
+        P["moray_profiler.py"] -->|Inspect Workspace AST & Toolchains| J["moray_boundary.json"]
+        J -->|--auto-harden| D["morayd Loader Daemon"]
     end
 
-    subgraph Kernel Boundary: VFS Pinned Maps
+    subgraph KernelBoundary ["Kernel Boundary: VFS Pinned Maps"]
         B -->|Pin Target PID| M["/sys/fs/bpf/moray/quarantine_map"]
         B -->|Pin Cgroup v2 Slice| C["/sys/fs/bpf/moray/cgroup_map"]
         B -->|Pin Wire IP| X["/sys/fs/bpf/moray/xdp_drop_map"]
         D -->|Seed Sentinel & Executable Whitelist| W["/sys/fs/bpf/moray/boundary_map"]
-        K["/sys/fs/bpf/moray/events"] -->|NDJSON Ringbuf Telemetry| H[moray_hook.py / Consumer]
+        K["/sys/fs/bpf/moray/events"] -->|NDJSON Ringbuf Telemetry| H["moray_hook.py / Consumer"]
     end
 
-    subgraph Layer 0: Linux Ring 0
-        M -->|Lookup PID/TGID| LSM[BPF-LSM Hooks]
+    subgraph KernelSpace ["Layer 0: Linux Ring 0"]
+        M -->|Lookup PID or TGID| LSM["BPF-LSM Hooks"]
         C -->|Lookup Cgroup ID| LSM
         W -->|Lookup Binary Comm| LSM
-        LSM -->|bprm_check_security| S1["Block execve -> -EPERM<br/>(Escalate >= 5 hits -> SIGKILL)"]
-        LSM -->|socket_connect| S2["Sever WAN Socket -> -EPERM<br/>(Loopback / IPC Exempted)"]
-        LSM -->|lsm/bpf: Anti-Tamper| S3[Block sys_bpf -> -EPERM]
-        X -->|O(1) Route Lookup| XDP[XDP Driver Hook]
-        XDP -->|Match Wire Drops| S4[XDP_DROP Packet]
+        LSM -->|bprm_check_security| S1["Block execve: Return -EPERM<br/>(Escalate to SIGKILL at 5 hits)"]
+        LSM -->|socket_connect| S2["Sever WAN Socket: Return -EPERM<br/>(Loopback / IPC Exempted)"]
+        LSM -->|lsm/bpf: Anti-Tamper| S3["Block sys_bpf: Return -EPERM"]
+        X -->|Fast Route Lookup| XDP["XDP Driver Hook"]
+        XDP -->|Match Wire Drops| S4["XDP_DROP Packet"]
         LSM -->|bpf_ringbuf_output| K
     end
 ```

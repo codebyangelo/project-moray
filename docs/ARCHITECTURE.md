@@ -14,30 +14,30 @@ Project Moray directly translates the predatory biology of the Moray eel (*Murae
 
 ```mermaid
 graph TD
-    subgraph User Space [Sunlit Shallows: User Space & Agent Workspaces]
-        A[AI Agent / LLM Runtime] -->|Inter-Agent Traffic / Tool Invocations| B[Project Lobster: Layer 7 Proxy]
-        B -->|Semantic Inspection: Flag Malicious PID / Slice| C[lobster_hook.py]
-        P[moray_profiler.py] -->|Autonomous AST & Toolchain Discovery| J[moray_boundary.json]
-        J -->|--auto-harden| F[morayd Loader Daemon]
-        O[Project Octopus] -.->|Cross-Repo Boundary Verification| S[SARIF 2.1.0 Telemetry Audit]
+    subgraph UserSpace ["Sunlit Shallows: User Space & Agent Workspaces"]
+        A["AI Agent / LLM Runtime"] -->|Inter-Agent Traffic / Tool Invocations| B["Project Lobster: Layer 7 Proxy"]
+        B -->|Semantic Inspection: Flag Malicious PID / Slice| C["lobster_hook.py"]
+        P["moray_profiler.py"] -->|Autonomous AST & Toolchain Discovery| J["moray_boundary.json"]
+        J -->|--auto-harden| F["morayd Loader Daemon"]
+        O["Project Octopus"] -.->|Cross-Repo Boundary Verification| S["SARIF 2.1.0 Telemetry Audit"]
     end
 
-    subgraph BPF FS [Shared VFS Boundary: /sys/fs/bpf/moray/]
+    subgraph BpfFS ["Shared VFS Boundary: /sys/fs/bpf/moray/"]
         C -->|bpf syscall / pin element| D["quarantine_map<br/>(BPF_MAP_TYPE_HASH)"]
         C -->|pin cgroup element| CG["cgroup_map<br/>(BPF_MAP_TYPE_HASH)"]
         C -->|pin IPv4 drop| X["xdp_drop_map<br/>(BPF_MAP_TYPE_HASH)"]
         F -->|seed sentinel & whitelist| W["boundary_map<br/>(BPF_MAP_TYPE_HASH)"]
-        E["events<br/>(BPF_MAP_TYPE_RINGBUF)"] -->|Event Stream| H[moray_hook.py / Consumer]
+        E["events<br/>(BPF_MAP_TYPE_RINGBUF)"] -->|Event Stream| H["moray_hook.py / Consumer"]
     end
 
-    subgraph Kernel Space [Benthic Trench: Ring 0 / eBPF VM]
-        D -->|Lookup PID/TGID| G[The Pharyngeal Jaw: BPF-LSM Hooks]
+    subgraph KernelSpace ["Benthic Trench: Ring 0 / eBPF VM"]
+        D -->|Lookup PID or TGID| G["The Pharyngeal Jaw: BPF-LSM Hooks"]
         CG -->|Lookup Cgroup ID| G
         W -->|Lookup Binary Comm| G
-        G -->|lsm/bprm_check_security| S1["Sever execve: Return -EPERM<br/>(Escalate >= 5 hits: SIGKILL)"]
+        G -->|lsm/bprm_check_security| S1["Sever execve: Return -EPERM<br/>(Escalate to SIGKILL at 5 hits)"]
         G -->|lsm/socket_connect| S2["Sever WAN socket: Return -EPERM<br/>(Loopback / IPC Exempted)"]
-        G -->|lsm/bpf: The Crevice| S3[Self-Defense: Block sys_bpf with -EPERM]
-        K[XDP Driver Hook: Network Ingress/Egress] -->|Match Wire Drops| S4[XDP_DROP: Drop Wire Frames]
+        G -->|lsm/bpf: The Crevice| S3["Self-Defense: Block sys_bpf with -EPERM"]
+        K["XDP Driver Hook: Network Ingress/Egress"] -->|Match Wire Drops| S4["XDP_DROP: Drop Wire Frames"]
         G -->|bpf_ringbuf_output| E
     end
 ```

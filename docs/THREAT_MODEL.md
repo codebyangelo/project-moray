@@ -62,27 +62,27 @@ Moray relies on four authoritative kernel-level hooks:
 
 ```mermaid
 graph TD
-    subgraph Syscall Boundary
-        A[User Space: execve] -->|bprm_check_security| B{Moray BPF-LSM Hook}
-        C[User Space: connect] -->|socket_connect| D{Moray BPF-LSM Hook}
-        E[User Space: bpf] -->|bpf syscall| F{Moray Anti-Tamper Hook}
+    subgraph SyscallBoundary ["Syscall Boundary"]
+        A["User Space: execve"] -->|bprm_check_security| B{"Moray BPF-LSM Hook"}
+        C["User Space: connect"] -->|socket_connect| D{"Moray BPF-LSM Hook"}
+        E["User Space: bpf"] -->|bpf syscall| F{"Moray Anti-Tamper Hook"}
     end
 
-    subgraph Network Driver Boundary
-        G[NIC Frame Ingress] -->|XDP Driver Hook| H{Moray XDP Filter}
+    subgraph NetDriverBoundary ["Network Driver Boundary"]
+        G["NIC Frame Ingress"] -->|XDP Driver Hook| H{"Moray XDP Filter"}
     end
 
-    subgraph Ring 0 Quarantine Hash Map
-        B -->|Lookup PID/TGID| M[(quarantine_map)]
-        D -->|Lookup PID/TGID| M
-        F -->|Lookup PID/TGID| M
-        H -->|Lookup Source IP| X[(xdp_drop_map)]
+    subgraph QuarantineMap ["Ring 0 Quarantine Hash Map"]
+        B -->|Lookup PID or TGID| M[("quarantine_map")]
+        D -->|Lookup PID or TGID| M
+        F -->|Lookup PID or TGID| M
+        H -->|Lookup Source IP| X[("xdp_drop_map")]
     end
 
-    B -->|Flag Asserted: Block| B1[Return -EPERM / SIGKILL]
-    D -->|Flag Asserted: Block| D1[Return -EPERM]
-    F -->|Flag Asserted: Block| F1[Return -EPERM]
-    H -->|IP Matched: Drop| H1[XDP_DROP Wire Frame]
+    B -->|Flag Asserted: Block| B1["Return -EPERM / SIGKILL"]
+    D -->|Flag Asserted: Block| D1["Return -EPERM"]
+    F -->|Flag Asserted: Block| F1["Return -EPERM"]
+    H -->|IP Matched: Drop| H1["XDP_DROP Wire Frame"]
 ```
 
 1. **`lsm/bprm_check_security`**: Authoritative gate for binary execution (`execve`, `execveat`).
