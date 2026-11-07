@@ -621,13 +621,13 @@ int main(int argc, char **argv) {
         }
 
         /* Autonomous Boundary Hardening */
-        const char *cand_manifest = manifest_path ? manifest_path : "moray_boundary.json";
-        if (auto_harden || access(cand_manifest, R_OK) == 0) {
+        if (auto_harden) {
+            const char *cand_manifest = manifest_path ? manifest_path : "moray_boundary.json";
             int bfd = bpf_map__fd(bpf_ctx.map_boundary);
             if (bfd >= 0) {
                 if (access(cand_manifest, R_OK) == 0) {
                     seed_boundary_manifest(bfd, cand_manifest);
-                } else if (auto_harden) {
+                } else {
                     seed_default_boundary(bfd);
                 }
             }
