@@ -1,0 +1,44 @@
+{
+  "version": "1.0.0",
+  "target_name": "project-moray",
+  "target_path": "/root/home/projects/project-moray",
+  "generated_by": "Project Moray Native Profiler (moray_profiler.py)",
+  "timestamp": "2026-11-07T17:28:04.982983+00:00",
+  "boundary_policy": {
+    "default_action": "AUTONOMOUS_STRIKE",
+    "allowed_comms": [
+      "as",
+      "bash",
+      "cat",
+      "clang",
+      "gcc",
+      "ld",
+      "ls",
+      "make",
+      "mkdir",
+      "morayd",
+      "pytest",
+      "python",
+      "python3",
+      "rm",
+      "ruff",
+      "sh",
+      "tcc",
+      "test_struct_lay",
+      "true",
+      "victim_worker"
+    ],
+    "allowed_paths": [
+      "/bin/bash",
+      "/bin/sh",
+      "/root/home/projects/project-moray/bin/morayd",
+      "/root/home/projects/project-moray/build/test_struct_layout",
+      "/usr/bin/make",
+      "/usr/bin/python3"
+    ],
+    "network_posture": "REQUIRE_WAN",
+    "cgroup_slice": "agent.slice",
+    "auto_quarantine_violations": true,
+    "max_strike_threshold": 5
+  }
+}
