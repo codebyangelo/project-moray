@@ -181,6 +181,7 @@ BPF_MAP_CREATE: int = 0
 BPF_MAP_LOOKUP_ELEM: int = 1
 BPF_MAP_UPDATE_ELEM: int = 2
 BPF_MAP_DELETE_ELEM: int = 3
+BPF_MAP_GET_NEXT_KEY: int = 4
 BPF_OBJ_PIN: int = 6
 BPF_OBJ_GET: int = 7
 BPF_ANY: int = 0
@@ -899,6 +900,16 @@ class MorayHook:
         Evict all entries whose TTL has elapsed. Returns list of evicted PIDs.
         """
         if not self.mock_mode:
+            if self._bpf_map_fd < 0 and os.path.exists(self.map_path):
+                self._open_bpf_map()
+            if self._bpf_map_fd >= 0:
+                evicted = []
+                now_ns = int(time.time() * 1_000_000_000)
+                for pid in self._bpf_list_all_keys():
+                    entry = self._bpf_lookup_elem(pid)
+                    if entry and is_entry_expired(entry, now_ns) and self._bpf_delete_elem(pid):
+                        evicted.append(pid)
+                return evicted
             return []
 
         def _do_evict() -> list[int]:
@@ -921,6 +932,19 @@ class MorayHook:
         """
         List active quarantine entries. Expired TTL entries are excluded unless include_expired=True.
         """
+        if not self.mock_mode:
+            if self._bpf_map_fd < 0 and os.path.exists(self.map_path):
+                self._open_bpf_map()
+            if self._bpf_map_fd >= 0:
+                entries = []
+                now_ns = int(time.time() * 1_000_000_000)
+                for pid in self._bpf_list_all_keys():
+                    entry = self._bpf_lookup_elem(pid)
+                    if entry and (include_expired or not is_entry_expired(entry, now_ns)):
+                        entries.append((pid, entry))
+                return entries
+            return []
+
         if self.mock_mode:
 
             def _do_list() -> list[tuple[int, MorayQuarantineEntry]]:
@@ -946,6 +970,17 @@ class MorayHook:
             raise MorayQuarantineError(
                 "Emergency flush requires explicit confirmation (force=True / --force)."
             )
+
+        if not self.mock_mode:
+            if self._bpf_map_fd < 0 and os.path.exists(self.map_path):
+                self._open_bpf_map()
+            if self._bpf_map_fd >= 0:
+                count = 0
+                for pid in self._bpf_list_all_keys():
+                    if self._bpf_delete_elem(pid):
+                        count += 1
+                return count
+            return 0
 
         if self.mock_mode:
 
@@ -1165,6 +1200,38 @@ class MorayHook:
                 return False
             raise MorayQuarantineError(f"bpf(BPF_MAP_DELETE_ELEM) failed: {os.strerror(err)}")
         return True
+
+    def _bpf_get_next_key(self, current_key: int | None) -> int | None:
+        if self.mock_mode or self._bpf_map_fd < 0:
+            return None
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        next_k = ctypes.c_uint32(0)
+        curr_k = ctypes.c_uint32(current_key) if current_key is not None else None
+
+        attr = BpfAttrMapElem(
+            map_fd=self._bpf_map_fd,
+            pad0=0,
+            key=ctypes.addressof(curr_k) if curr_k is not None else 0,
+            value=ctypes.addressof(next_k),
+            flags=0,
+        )
+        nr = get_bpf_syscall_nr()
+        ret = libc.syscall(nr, BPF_MAP_GET_NEXT_KEY, ctypes.byref(attr), ctypes.sizeof(attr))
+        if ret != 0:
+            err = ctypes.get_errno()
+            if err == 2:  # ENOENT
+                return None
+            raise MorayQuarantineError(f"bpf(BPF_MAP_GET_NEXT_KEY) failed: {os.strerror(err)}")
+        return int(next_k.value)
+
+    def _bpf_list_all_keys(self) -> list[int]:
+        keys: list[int] = []
+        curr = self._bpf_get_next_key(None)
+        while curr is not None:
+            keys.append(curr)
+            curr = self._bpf_get_next_key(curr)
+        return keys
 
     # -------------------------------------------------------------------------
     # Phase 6.4: Wire-Level XDP Drop Map Lifecycle & Persistence
@@ -1719,6 +1786,10 @@ class MorayHook:
             return count
 
         return self._with_cgroup_lock(_do_flush)
+
+
+# Backward compatibility alias
+MorayQuarantineHook = MorayHook
 
 
 def main() -> None:
