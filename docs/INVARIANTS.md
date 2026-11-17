@@ -64,7 +64,7 @@ This document codifies the core architectural invariants of Project Moray (`mora
 * **Definition**: When `--auto-harden` is explicitly asserted on `morayd`, `moray_boundary_map` is populated with a sentinel entry (`"__moray_auto__"`) and an authorized executable whitelist. When the sentinel is present, any process invoking `execve` whose calling executable name (`comm`) is NOT registered in `moray_boundary_map` with `MORAY_PERM_EXEC` MUST be immediately severed with `-EPERM` and autonomously quarantined in Ring 0 without waiting for user-space intervention.
 * **Opt-In Invariant**: When `--auto-harden` is omitted, the sentinel `"__moray_auto__"` MUST NOT be inserted. In this unseeded state, unquarantined processes pass unimpeded ($O(1)$ fast path under $I_2$), preserving the fail-safe boundary and preventing unintentional system-wide execution blocking.
 * **Enforcement Point**: `moray_bprm_strike` in `src/moray_kern.bpf.c` and `seed_boundary_manifest()` in `src/morayd.c`.
-* **Verification**: `tests/test_autonomous_boundary_e2e.py` and `tests/test_struct_layout.c` (verifying 16-byte boundary struct layout).
+* **Verification**: `tests/test_autonomous_boundary_e2e.py`, `tests/test_struct_layout.c` (verifying 16-byte boundary struct layout), and live Ring 0 KVM microVM (`tests/run_live_kernel_test.sh` Steps 47–54 staged for CI).
 
 ---
 
@@ -82,4 +82,4 @@ This document codifies the core architectural invariants of Project Moray (`mora
 | **$I_6$** | Repository Git history | Differential CI check | Zero synthetic commit hashes or ungrounded claims. |
 | **$I_7$** | `lsm/bpf`, `lobster_hook.py` | `tests/test_anti_tamper.py`, `tests/run_live_kernel_test.sh` | Quarantined PID calling `sys_bpf` receives `-EPERM`; `--report-tamper` asserts strike. |
 | **$I_8$** | `lsm/socket_connect` | `tests/test_network_policy.py`, `tests/run_live_kernel_test.sh` | External WAN blocked with `-EPERM`; loopback/IPC allowed when flag asserted. |
-| **$I_9$** | `moray_boundary_map`, `morayd.c` | `tests/test_autonomous_boundary_e2e.py` | Unlisted binary blocked with `-EPERM`; authorized binaries pass with zero-latency overhead. |
+| **$I_9$** | `moray_boundary_map`, `morayd.c` | `tests/test_autonomous_boundary_e2e.py`, `tests/run_live_kernel_test.sh` (Steps 47–54 staged) | Real manifest loaded; unlisted binary blocked with `-EPERM`; authorized binaries pass; loopback allowed and WAN blocked under `ALLOW_LOOPBACK`. |

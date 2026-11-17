@@ -91,6 +91,18 @@ int main(int argc, char **argv) {
         const char *bin = (access("/bin/true", X_OK) == 0) ? "/bin/true" : "/usr/bin/true";
         execve(bin, args, envp);
         return 1; /* Should never reach here if execve succeeds */
+    } else if (strcmp(argv[1], "--assert-unlisted-exec") == 0) {
+        char *const args[] = {"/bin/true", NULL};
+        char *const envp[] = {NULL};
+        const char *bin = (access("/bin/true", X_OK) == 0) ? "/bin/true" : "/usr/bin/true";
+        execve(bin, args, envp);
+
+        int err = errno;
+        fprintf(stdout, "[VICTIM-UNLISTED] execve returned -1, errno=%d (%s)\n", err, strerror(err));
+        if (err == EPERM || err == EACCES) {
+            return 42; /* Success: Kernel blocked unlisted binary execution */
+        }
+        return 1;
     } else if (strcmp(argv[1], "--wait-and-exec") == 0) {
         /* Wait for containment strike to be registered in kernel map */
         wait_for_strike();
@@ -114,10 +126,22 @@ int main(int argc, char **argv) {
             return 43; /* Success: Kernel blocked bpf */
         }
         return 1;
-    } else if (strcmp(argv[1], "--wait-and-connect-wan") == 0) {
-        const char *ip = (argc > 2) ? argv[2] : "1.1.1.1";
-        int port = (argc > 3) ? atoi(argv[3]) : 80;
-        wait_for_strike();
+    } else if (strcmp(argv[1], "--wait-and-connect-wan") == 0 || strcmp(argv[1], "--connect-wan") == 0) {
+        const char *ip = "1.1.1.1";
+        int port = 80;
+        int no_wait = (strcmp(argv[1], "--connect-wan") == 0);
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--no-wait") == 0) {
+                no_wait = 1;
+            } else if (strchr(argv[i], '.')) {
+                ip = argv[i];
+            } else if (atoi(argv[i]) > 0) {
+                port = atoi(argv[i]);
+            }
+        }
+        if (!no_wait) {
+            wait_for_strike();
+        }
 
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) {
@@ -141,9 +165,19 @@ int main(int argc, char **argv) {
             return 44; /* Success: Kernel blocked WAN connect */
         }
         return 1;
-    } else if (strcmp(argv[1], "--wait-and-connect-loopback") == 0) {
-        int port = (argc > 2) ? atoi(argv[2]) : 80;
-        wait_for_strike();
+    } else if (strcmp(argv[1], "--wait-and-connect-loopback") == 0 || strcmp(argv[1], "--connect-loopback") == 0) {
+        int port = 80;
+        int no_wait = (strcmp(argv[1], "--connect-loopback") == 0);
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--no-wait") == 0) {
+                no_wait = 1;
+            } else if (atoi(argv[i]) > 0) {
+                port = atoi(argv[i]);
+            }
+        }
+        if (!no_wait) {
+            wait_for_strike();
+        }
 
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) {
@@ -167,9 +201,19 @@ int main(int argc, char **argv) {
             return 45; /* Success: Loopback connect permitted past LSM */
         }
         return 1;
-    } else if (strcmp(argv[1], "--wait-and-connect-unix") == 0) {
-        const char *sock_path = (argc > 2) ? argv[2] : "/tmp/moray_test.sock";
-        wait_for_strike();
+    } else if (strcmp(argv[1], "--wait-and-connect-unix") == 0 || strcmp(argv[1], "--connect-unix") == 0) {
+        const char *sock_path = "/tmp/moray_test.sock";
+        int no_wait = (strcmp(argv[1], "--connect-unix") == 0);
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--no-wait") == 0) {
+                no_wait = 1;
+            } else if (argv[i][0] == '/') {
+                sock_path = argv[i];
+            }
+        }
+        if (!no_wait) {
+            wait_for_strike();
+        }
 
         int fd = socket(AF_UNIX, SOCK_STREAM, 0);
         if (fd < 0) {

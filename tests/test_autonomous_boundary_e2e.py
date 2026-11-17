@@ -133,6 +133,66 @@ class TestAutonomousBoundaryE2E:
                 proc.kill()
                 proc.wait()
 
+    def test_e2e_boundary_manifest_verification(self, tmp_path: Path) -> None:
+        """MorayHook verifies boundary manifest against boundary table."""
+        from bridge.moray_hook import (
+            MORAY_PERM_ALL,
+            MORAY_PERM_EXEC,
+            MorayBoundaryEntry,
+            MorayQuarantineError,
+        )
+
+        hook = MorayHook(mock_mode=True)
+
+        # Seed mock boundary entries
+        sentinel = MorayBoundaryEntry()
+        sentinel.perm_flags = MORAY_PERM_EXEC
+        hook._mock_boundary_table["__moray_auto__"] = sentinel
+
+        vw = MorayBoundaryEntry()
+        vw.perm_flags = MORAY_PERM_EXEC
+        hook._mock_boundary_table["victim_worker"] = vw
+
+        daemon = MorayBoundaryEntry()
+        daemon.perm_flags = MORAY_PERM_ALL
+        hook._mock_boundary_table["morayd"] = daemon
+
+        manifest_file = tmp_path / "test_manifest.json"
+        manifest_data = {
+            "version": "1.0.0",
+            "target_name": "test-agent",
+            "boundary_policy": {
+                "default_action": "AUTONOMOUS_STRIKE",
+                "allowed_comms": ["victim_worker"],
+                "network_posture": "ALLOW_LOOPBACK",
+            },
+        }
+        manifest_file.write_text(json.dumps(manifest_data))
+
+        res = hook.verify_boundary_manifest(str(manifest_file))
+        assert res["status"] == "verified"
+        assert res["network_posture"] == "ALLOW_LOOPBACK"
+
+        boundary_list = hook.list_boundary()
+        assert "__moray_auto__" in boundary_list
+        assert boundary_list["victim_worker"]["can_exec"] is True
+        assert boundary_list["victim_worker"]["can_socket"] is False
+
+        # Negative check: manifest with missing comm fails closed
+        bad_manifest = tmp_path / "bad_manifest.json"
+        bad_data = {
+            "version": "1.0.0",
+            "target_name": "bad-agent",
+            "boundary_policy": {
+                "default_action": "AUTONOMOUS_STRIKE",
+                "allowed_comms": ["unlisted_worker"],
+                "network_posture": "ALLOW_LOOPBACK",
+            },
+        }
+        bad_manifest.write_text(json.dumps(bad_data))
+        with pytest.raises(MorayQuarantineError, match="missing from kernel"):
+            hook.verify_boundary_manifest(str(bad_manifest))
+
     def test_e2e_adversarial_payload_containment_matrix(self) -> None:
         """Simulated adversarial injections verify autonomous interception across all vectors."""
         hook = MorayHook()  # Mock mode

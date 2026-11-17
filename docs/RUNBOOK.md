@@ -497,5 +497,5 @@ All production environments running Project Moray must pass this gate before unt
 - [ ] `systemctl is-active morayd.service` returns `active`.
 - [ ] `lobster-hook --healthcheck` returns `healthy`.
 - [ ] All 141 test cases in `make verify` pass cleanly under local CI.
-- [ ] All 46 live Ring 0 verification steps pass cleanly under KVM microVM (`tests/run_live_kernel_test.sh`).
+- [ ] All live Ring 0 verification steps (Steps 1–46 in CI, Steps 47–54 staged) pass cleanly under KVM microVM (`tests/run_live_kernel_test.sh`).
 - [ ] Break-glass procedures (`--flush-all --force`) tested in staging environment.
