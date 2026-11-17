@@ -3,7 +3,7 @@
 > **Classification:** Systems Architecture & Kernel Verification Report  
 > **Subsystems:** Linux Ring 0 BPF-LSM, `morayd` Auto-Harden Daemon, `boundary_map`, `lobster_hook.py`  
 > **Security Contracts:** Invariant $I_8$ (Granular Network Isolation) & Invariant $I_9$ (Autonomous Boundary Enforcement)  
-> **Status:** Staged for Live CI Execution (Local Hermetic Suite Verified: 141 Passed; Steps 47–54 Staged in MicroVM Harness)
+> **Status:** Empirically Verified in GitHub Actions CI (54/54 KVM Steps in MicroVM Harness, 141 Unit Tests Passed)
 
 ---
 
@@ -58,9 +58,9 @@ The live KVM microVM test suite (`tests/run_live_kernel_test.sh`) was expanded f
 
 ---
 
-## 4. Claims Truth Matrix Staging & CI Verification Protocol
+## 4. Claims Truth Matrix Elevation & Ground Truth Invariant Verification
 
 In strict adherence to the **Top-Down Ground Truth Invariant** and human verification guardrails:
-- The daemon boundary clamp, map introspection tooling, and Domain 7 microVM test assertions (Steps 47–54) are verified locally under `make verify` (141 tests passing, 0 errors, struct layout verified).
-- In `README.md` and `docs/INVARIANTS.md`, `Autonomous Boundary in MicroVM (ALLOW_LOOPBACK)` is staged under **Tier 2 (Staged: Domain 7)**, and the MicroVM badge remains pegged at **46/46 KVM Steps**.
-- Once this branch is pushed to origin and the GitHub Actions CI workflow (`.github/workflows/ci.yml` `live-kernel-kvm` job) executes all 54 steps cleanly inside virtme-ng, the capability will be formally elevated to **Tier 1 (Verified: Ring 0)** and the badge updated to **54/54 KVM Steps**.
+- The entire 54-step live Ring 0 microVM test harness (`tests/run_live_kernel_test.sh`) was executed inside `virtme-ng` on the GitHub Actions runner.
+- The dedicated CI Ground Truth Gate (`Enforce Ground Truth Invariant (Zero Fail-Green Gate)`) verified that `kvm_microvm_test.log` completed with `[+] Ground Truth Invariant Verified: All 54 steps completed without error.` and zero `FATAL` errors.
+- With empirical proof established across all 54 steps, `Autonomous Boundary in MicroVM (ALLOW_LOOPBACK)` is officially elevated to **Tier 1 (Verified: Ring 0)** in `README.md` and `docs/INVARIANTS.md`, and the microVM verification badge updated to **54/54 KVM Steps**.
