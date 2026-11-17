@@ -2000,9 +2000,21 @@ class MorayHook:
                 entry = live_entries[comm_key]
                 if not entry["can_exec"]:
                     mismatched_comms.append(f"{comm_key}: missing MORAY_PERM_EXEC")
-                if network_posture == "ALLOW_LOOPBACK" and entry["can_socket"]:
+                if (
+                    comm_key != "morayd"
+                    and network_posture == "ALLOW_LOOPBACK"
+                    and entry["can_socket"]
+                ):
                     mismatched_comms.append(
                         f"{comm_key}: improperly granted MORAY_PERM_SOCKET under ALLOW_LOOPBACK"
+                    )
+                elif (
+                    comm_key != "morayd"
+                    and network_posture == "REQUIRE_WAN"
+                    and not entry["can_socket"]
+                ):
+                    mismatched_comms.append(
+                        f"{comm_key}: missing MORAY_PERM_SOCKET under REQUIRE_WAN"
                     )
 
         if missing_comms:
@@ -2015,12 +2027,11 @@ class MorayHook:
             )
 
         # 3. Verify Daemon Self Entry
-        if "morayd" in live_entries:
-            daemon_entry = live_entries["morayd"]
-            if not (daemon_entry["can_exec"] and daemon_entry["can_socket"]):
-                raise MorayQuarantineError(
-                    "Daemon entry 'morayd' missing MORAY_PERM_ALL in kernel map"
-                )
+        if "morayd" not in live_entries:
+            raise MorayQuarantineError("Daemon entry 'morayd' missing from kernel boundary map")
+        daemon_entry = live_entries["morayd"]
+        if not (daemon_entry["can_exec"] and daemon_entry["can_socket"]):
+            raise MorayQuarantineError("Daemon entry 'morayd' missing MORAY_PERM_ALL in kernel map")
 
         return {
             "status": "verified",

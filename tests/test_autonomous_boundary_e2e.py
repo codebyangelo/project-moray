@@ -163,7 +163,7 @@ class TestAutonomousBoundaryE2E:
             "target_name": "test-agent",
             "boundary_policy": {
                 "default_action": "AUTONOMOUS_STRIKE",
-                "allowed_comms": ["victim_worker"],
+                "allowed_comms": ["morayd", "victim_worker"],
                 "network_posture": "ALLOW_LOOPBACK",
             },
         }
@@ -177,8 +177,10 @@ class TestAutonomousBoundaryE2E:
         assert "__moray_auto__" in boundary_list
         assert boundary_list["victim_worker"]["can_exec"] is True
         assert boundary_list["victim_worker"]["can_socket"] is False
+        assert boundary_list["morayd"]["can_exec"] is True
+        assert boundary_list["morayd"]["can_socket"] is True
 
-        # Negative check: manifest with missing comm fails closed
+        # Negative check 1: manifest with missing comm fails closed
         bad_manifest = tmp_path / "bad_manifest.json"
         bad_data = {
             "version": "1.0.0",
@@ -192,6 +194,39 @@ class TestAutonomousBoundaryE2E:
         bad_manifest.write_text(json.dumps(bad_data))
         with pytest.raises(MorayQuarantineError, match="missing from kernel"):
             hook.verify_boundary_manifest(str(bad_manifest))
+
+        # Negative check 2: worker comm improperly granted MORAY_PERM_SOCKET under ALLOW_LOOPBACK fails closed
+        vw_leaky = MorayBoundaryEntry()
+        vw_leaky.perm_flags = MORAY_PERM_ALL
+        hook._mock_boundary_table["victim_worker"] = vw_leaky
+        with pytest.raises(MorayQuarantineError, match="improperly granted MORAY_PERM_SOCKET"):
+            hook.verify_boundary_manifest(str(manifest_file))
+
+        # Restore victim_worker to valid state
+        vw.perm_flags = MORAY_PERM_EXEC
+        hook._mock_boundary_table["victim_worker"] = vw
+
+        # Negative check 3: missing morayd daemon self-entry fails closed
+        del hook._mock_boundary_table["morayd"]
+        with pytest.raises(MorayQuarantineError, match="missing from kernel"):
+            hook.verify_boundary_manifest(str(manifest_file))
+
+        # Check when morayd is not in allowed_comms, Section 3 catches missing morayd
+        manifest_no_daemon = tmp_path / "test_no_daemon.json"
+        manifest_no_daemon.write_text(
+            json.dumps(
+                {
+                    "version": "1.0.0",
+                    "boundary_policy": {
+                        "default_action": "AUTONOMOUS_STRIKE",
+                        "allowed_comms": ["victim_worker"],
+                        "network_posture": "ALLOW_LOOPBACK",
+                    },
+                }
+            )
+        )
+        with pytest.raises(MorayQuarantineError, match="Daemon entry 'morayd' missing"):
+            hook.verify_boundary_manifest(str(manifest_no_daemon))
 
     def test_e2e_adversarial_payload_containment_matrix(self) -> None:
         """Simulated adversarial injections verify autonomous interception across all vectors."""
