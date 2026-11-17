@@ -82,4 +82,5 @@ jobs:
           kvm_microvm_test.log
           /tmp/morayd_live.log
           /tmp/morayd_relaunch.log
+          /tmp/morayd_auto.log
         if-no-files-found: ignore

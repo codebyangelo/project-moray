@@ -72,7 +72,7 @@ In adherence to the **Provenance & Chronology Invariant ($I_6$)** and strict hum
 | | **Sovereign Boundary Profiler** | **Verified (Hermetic)** | Zero-dependency AST/toolchain analysis producing valid `moray_boundary.json` (`tests/test_autonomous_boundary_e2e.py`). |
 | | **Daemon Auto-Harden Startup** | **Verified (Hermetic)** | Ingests manifest, seeds `moray_boundary_map`, enforces strict opt-in discipline (`tests/test_autonomous_boundary_e2e.py`). |
 | **Tier 2: Partially Tested / Mock-Emulated** | **Cross-Repo Octopus Audit** | **Conditional CI** | Verified when Project Octopus sibling workspace is present; safely skipped without error in standalone CI runners. |
-| | **Autonomous Boundary in MicroVM** | **Mock-Verified** | 100% verified in mock and daemon startup tests; live microVM harness currently focuses on 46 manual strike steps. |
+| | **Autonomous Boundary in MicroVM (`ALLOW_LOOPBACK`)** | **Staged (Domain 7)** | Hermetic tests verified (141 passed); live microVM test suite extended with Domain 7 (Steps 47–54) staging real manifest loading, map inspection, listed/unlisted execution, and loopback/WAN enforcement pending GitHub Actions execution. |
 | **Tier 3: Claimed in Threat Model / Roadmap** | **VFS Path Unlink Protection** | **In Progress (Phase 8)**| Pinned maps protected by OS permissions (`0700` root) and `lsm/bpf`; dedicated VFS LSM hooks (`file_unlink`) scheduled for Phase 8. |
 | | **IPv6 Wire-Rate Drops** | **Roadmap** | `moray_xdp_drop_map` currently keys on `__u32` IPv4 addresses; IPv6 128-bit keying scheduled for future release. |
 | | **Deep Packet Inspection (DPI)** | **Deferred to L7** | Moray operates at L0/L3/L4; semantic payload analysis and regex inspection are delegated to Project Lobster. |
@@ -93,7 +93,7 @@ In adherence to the **Provenance & Chronology Invariant ($I_6$)** and strict hum
 * **`moray_boundary.json`**: Machine-readable boundary specification for autonomous zero-config hardening.
 * **`tests/`**: Comprehensive test suite comprising:
   - 141 hermetic unit tests verifying layout, policy engine, XDP filter, cgroups, network policy, and E2E pipeline.
-  - 46 live Ring 0 kernel verification steps running inside a real KVM microVM (`run_live_kernel_test.sh`).
+  - 46 live Ring 0 kernel verification steps running inside a real KVM microVM (`run_live_kernel_test.sh`), with Domain 7 (Steps 47–54) staged for CI execution.
 
 ---
 

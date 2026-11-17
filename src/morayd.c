@@ -400,7 +400,7 @@ static void seed_default_boundary(int map_fd) {
     for (size_t i = 0; i < count; i++) {
         char key[MORAY_COMM_LEN] = {0};
         strncpy(key, defaults[i], sizeof(key) - 1);
-        struct moray_boundary_entry val = { .perm_flags = MORAY_PERM_ALL, .reserved = 0, .hit_count = 0 };
+        struct moray_boundary_entry val = { .perm_flags = MORAY_PERM_EXEC, .reserved = 0, .hit_count = 0 };
         bpf_map_update_elem(map_fd, key, &val, BPF_ANY);
     }
     fprintf(stdout, "[+] Auto-Harden: Seeded %zu default executables into boundary_map.\n", count);
@@ -470,7 +470,7 @@ static int seed_boundary_manifest(int map_fd, const char *manifest_path) {
 
                     struct moray_boundary_entry entry;
                     memset(&entry, 0, sizeof(entry));
-                    entry.perm_flags = MORAY_PERM_ALL;
+                    entry.perm_flags = allow_wan ? MORAY_PERM_ALL : MORAY_PERM_EXEC;
                     bpf_map_update_elem(map_fd, comm, &entry, BPF_ANY);
                     count++;
                 }

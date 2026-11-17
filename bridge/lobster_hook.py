@@ -55,16 +55,24 @@ MORAY_STRIKE_TIER1: int = 1  # 1 hit: Block execve
 MORAY_STRIKE_TIER2: int = 3  # 3 hits: Block execve + network sockets
 MORAY_STRIKE_TIER3: int = 5  # 5 hits: Auto-escalate to SIGKILL
 
+# Boundary Permission Flags matching src/moray.h
+MORAY_PERM_NONE: int = 0x00
+MORAY_PERM_EXEC: int = 0x01
+MORAY_PERM_SOCKET: int = 0x02
+MORAY_PERM_ALL: int = 0xFF
+
 # Default Pinned Paths
 DEFAULT_PIN_DIR: str = "/sys/fs/bpf/moray"
 DEFAULT_QUARANTINE_PIN: str = "/sys/fs/bpf/moray/quarantine_map"
 DEFAULT_EVENTS_PIN: str = "/sys/fs/bpf/moray/events"
 DEFAULT_XDP_PIN: str = "/sys/fs/bpf/moray/xdp_drop_map"
 DEFAULT_CGROUP_PIN: str = "/sys/fs/bpf/moray/cgroup_map"
+DEFAULT_BOUNDARY_PIN: str = "/sys/fs/bpf/moray/boundary_map"
 DEFAULT_MOCK_QUARANTINE_FILE: str = "/tmp/moray_quarantine_mock.bin"
 DEFAULT_MOCK_XDP_FILE: str = "/tmp/moray_xdp_mock.bin"
 DEFAULT_MOCK_EVENTS_FILE: str = "/tmp/moray_events_mock.jsonl"
 DEFAULT_MOCK_CGROUP_FILE: str = "/tmp/moray_cgroup_mock.bin"
+DEFAULT_MOCK_BOUNDARY_FILE: str = "/tmp/moray_boundary_mock.bin"
 
 # Resource and Safety Ceilings
 MAX_MAP_FILE_BYTES: int = 64 * 1024  # 64 KB heap ceiling clamp (Radare2 Issue #12924)
@@ -175,6 +183,22 @@ class MorayEvent(ctypes.Structure):
 
 assert ctypes.sizeof(MorayQuarantineEntry) == 24, "MorayQuarantineEntry size mismatch"
 assert ctypes.sizeof(MorayEvent) == 128, "MorayEvent size mismatch"
+
+
+class MorayBoundaryEntry(ctypes.Structure):
+    """
+    Binary structure for moray_boundary_map value.
+    Size: 16 bytes (8-byte aligned). Matches src/moray.h exactly.
+    """
+
+    _fields_ = [
+        ("perm_flags", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
+        ("hit_count", ctypes.c_uint64),
+    ]
+
+
+assert ctypes.sizeof(MorayBoundaryEntry) == 16, "MorayBoundaryEntry size mismatch"
 
 # BPF Syscall Command Codes & Flags
 BPF_MAP_CREATE: int = 0
@@ -524,19 +548,23 @@ class MorayHook:
         events_path: str = DEFAULT_EVENTS_PIN,
         xdp_map_path: str = DEFAULT_XDP_PIN,
         cgroup_map_path: str = DEFAULT_CGROUP_PIN,
+        boundary_map_path: str = DEFAULT_BOUNDARY_PIN,
         mock_mode: bool = False,
     ) -> None:
         self.map_path: str = map_path
         self.events_path: str = events_path
         self.xdp_map_path: str = xdp_map_path
         self.cgroup_map_path: str = cgroup_map_path
+        self.boundary_map_path: str = boundary_map_path
         self.mock_mode: bool = mock_mode
         self._mock_table: dict[int, MorayQuarantineEntry] = {}
         self._mock_xdp_table: dict[bytes, int] = {}
         self._mock_cgroup_table: dict[int, MorayQuarantineEntry] = {}
+        self._mock_boundary_table: dict[str, MorayBoundaryEntry] = {}
         self._bpf_map_fd: int = -1
         self._bpf_xdp_fd: int = -1
         self._bpf_cgroup_fd: int = -1
+        self._bpf_boundary_fd: int = -1
         self._consumer: MorayTelemetryConsumer | None = None
 
         # Anti-Traversal Invariant: Reject symbolic links to prevent state redirection
@@ -556,6 +584,10 @@ class MorayHook:
             raise MorayQuarantineError(
                 f"Symlink cgroup map path rejected for security (anti-traversal invariant): {self.cgroup_map_path}"
             )
+        if os.path.islink(self.boundary_map_path):
+            raise MorayQuarantineError(
+                f"Symlink boundary map path rejected for security (anti-traversal invariant): {self.boundary_map_path}"
+            )
 
         if not self.mock_mode and not os.path.exists(self.map_path):
             self.mock_mode = True
@@ -569,6 +601,8 @@ class MorayHook:
                 self.events_path = DEFAULT_MOCK_EVENTS_FILE
             if self.cgroup_map_path == DEFAULT_CGROUP_PIN:
                 self.cgroup_map_path = DEFAULT_MOCK_CGROUP_FILE
+            if self.boundary_map_path == DEFAULT_BOUNDARY_PIN:
+                self.boundary_map_path = DEFAULT_MOCK_BOUNDARY_FILE
             self._with_lock(self._load_mock_file)
             self._with_xdp_lock(self._load_mock_xdp_file)
             self._with_cgroup_lock(self._load_mock_cgroup_file)
@@ -578,6 +612,8 @@ class MorayHook:
                 self._open_bpf_xdp_map()
             if os.path.exists(self.cgroup_map_path):
                 self._open_bpf_cgroup_map()
+            if os.path.exists(self.boundary_map_path):
+                self._open_bpf_boundary_map()
 
     def get_consumer(self) -> MorayTelemetryConsumer:
         """Get or initialize the telemetry consumer."""
@@ -689,6 +725,25 @@ class MorayHook:
             )
         self._bpf_cgroup_fd = fd
 
+    def _open_bpf_boundary_map(self) -> None:
+        """Open pinned boundary map via sys_bpf(BPF_OBJ_GET)."""
+        libc = ctypes.CDLL(None, use_errno=True)
+        b_path = self.boundary_map_path.encode("utf-8")
+        path_buf = ctypes.create_string_buffer(b_path)
+        attr = BpfAttrObjGet(
+            pathname=ctypes.cast(path_buf, ctypes.c_void_p).value or 0,
+            bpf_fd=0,
+            file_flags=0,
+        )
+        nr = get_bpf_syscall_nr()
+        fd = libc.syscall(nr, BPF_OBJ_GET, ctypes.byref(attr), ctypes.sizeof(attr))
+        if fd < 0:
+            err = ctypes.get_errno()
+            raise MorayQuarantineError(
+                f"Failed to access pinned boundary map at '{self.boundary_map_path}': {os.strerror(err)} (code {err})"
+            )
+        self._bpf_boundary_fd = fd
+
     def close(self) -> None:
         if self._consumer:
             self._consumer.close()
@@ -702,6 +757,9 @@ class MorayHook:
         if self._bpf_cgroup_fd >= 0:
             os.close(self._bpf_cgroup_fd)
             self._bpf_cgroup_fd = -1
+        if self._bpf_boundary_fd >= 0:
+            os.close(self._bpf_boundary_fd)
+            self._bpf_boundary_fd = -1
 
     def _with_lock(self, func: Callable[[], T]) -> T:
         """Serialize map operations across processes and threads using POSIX file lock."""
@@ -1787,6 +1845,193 @@ class MorayHook:
 
         return self._with_cgroup_lock(_do_flush)
 
+    # -------------------------------------------------------------------------
+    # Phase 7: Autonomous Boundary Map Lifecycle & Verification (Invariant I_9)
+    # -------------------------------------------------------------------------
+
+    def _bpf_boundary_get_next_key(self, current_key: bytes | None) -> bytes | None:
+        if self._bpf_boundary_fd < 0:
+            return None
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        next_k = ctypes.create_string_buffer(16)
+        curr_k = ctypes.create_string_buffer(current_key, 16) if current_key is not None else None
+
+        attr = BpfAttrMapElem(
+            map_fd=self._bpf_boundary_fd,
+            pad0=0,
+            key=ctypes.addressof(curr_k) if curr_k is not None else 0,
+            value=ctypes.addressof(next_k),
+            flags=0,
+        )
+        nr = get_bpf_syscall_nr()
+        ret = libc.syscall(nr, BPF_MAP_GET_NEXT_KEY, ctypes.byref(attr), ctypes.sizeof(attr))
+        if ret != 0:
+            err = ctypes.get_errno()
+            if err == 2:  # ENOENT
+                return None
+            raise MorayQuarantineError(
+                f"bpf(BPF_MAP_GET_NEXT_KEY) failed for boundary: {os.strerror(err)}"
+            )
+        return next_k.raw
+
+    def _bpf_boundary_lookup_elem(self, comm_key: bytes) -> MorayBoundaryEntry | None:
+        if self._bpf_boundary_fd < 0:
+            return None
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        k = ctypes.create_string_buffer(comm_key, 16)
+        entry = MorayBoundaryEntry()
+        attr = BpfAttrMapElem(
+            map_fd=self._bpf_boundary_fd,
+            pad0=0,
+            key=ctypes.addressof(k),
+            value=ctypes.addressof(entry),
+            flags=0,
+        )
+        nr = get_bpf_syscall_nr()
+        ret = libc.syscall(nr, BPF_MAP_LOOKUP_ELEM, ctypes.byref(attr), ctypes.sizeof(attr))
+        if ret != 0:
+            err = ctypes.get_errno()
+            if err == 2:  # ENOENT
+                return None
+            raise MorayQuarantineError(
+                f"bpf(BPF_MAP_LOOKUP_ELEM) failed for boundary: {os.strerror(err)}"
+            )
+        return entry
+
+    def get_boundary_entry(self, comm: str) -> MorayBoundaryEntry | None:
+        """Query boundary entry for a specific comm from live kernel map or mock table."""
+        if self._bpf_boundary_fd < 0 and os.path.exists(self.boundary_map_path):
+            self._open_bpf_boundary_map()
+
+        comm_bytes = comm.encode("utf-8")[:15]
+        if self._bpf_boundary_fd >= 0:
+            return self._bpf_boundary_lookup_elem(comm_bytes)
+        return self._mock_boundary_table.get(comm[:15])
+
+    def list_boundary(self) -> dict[str, dict[str, Any]]:
+        """
+        List all active boundary entries from the in-kernel moray_boundary_map.
+        Returns dict keyed by comm string.
+        """
+        if self._bpf_boundary_fd < 0 and os.path.exists(self.boundary_map_path):
+            self._open_bpf_boundary_map()
+
+        res: dict[str, dict[str, Any]] = {}
+        if self._bpf_boundary_fd >= 0:
+            curr = self._bpf_boundary_get_next_key(None)
+            while curr is not None:
+                entry = self._bpf_boundary_lookup_elem(curr)
+                if entry is not None:
+                    comm_str = curr.split(b"\x00", 1)[0].decode("utf-8", errors="replace")
+                    res[comm_str] = {
+                        "comm": comm_str,
+                        "perm_flags": entry.perm_flags,
+                        "hit_count": entry.hit_count,
+                        "can_exec": bool(entry.perm_flags & MORAY_PERM_EXEC),
+                        "can_socket": bool(entry.perm_flags & MORAY_PERM_SOCKET),
+                    }
+                curr = self._bpf_boundary_get_next_key(curr)
+        else:
+            for comm_str, entry in self._mock_boundary_table.items():
+                res[comm_str] = {
+                    "comm": comm_str,
+                    "perm_flags": entry.perm_flags,
+                    "hit_count": entry.hit_count,
+                    "can_exec": bool(entry.perm_flags & MORAY_PERM_EXEC),
+                    "can_socket": bool(entry.perm_flags & MORAY_PERM_SOCKET),
+                }
+        return res
+
+    def verify_boundary_manifest(self, manifest_path: str) -> dict[str, Any]:
+        """
+        Verify that the live in-kernel boundary_map strictly satisfies the given boundary manifest.
+        Asserts sentinel presence, network posture alignment, and executable whitelisting.
+        Raises MorayQuarantineError if any assertion fails.
+        """
+        if not os.path.exists(manifest_path):
+            raise MorayQuarantineError(f"Boundary manifest not found at: {manifest_path}")
+
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+        except Exception as exc:
+            raise MorayQuarantineError(f"Failed to parse boundary manifest: {exc}") from exc
+
+        boundary_policy = manifest.get("boundary_policy", {})
+        network_posture = boundary_policy.get("network_posture", "ALLOW_LOOPBACK")
+        allowed_comms = boundary_policy.get("allowed_comms", [])
+
+        live_entries = self.list_boundary()
+        if not live_entries:
+            raise MorayQuarantineError("Boundary map is empty or inaccessible in kernel")
+
+        # 1. Verify Sentinel State
+        sentinel_key = "__moray_auto__"
+        if sentinel_key not in live_entries:
+            raise MorayQuarantineError(
+                f"Sentinel '{sentinel_key}' missing from live in-kernel boundary map!"
+            )
+
+        sentinel = live_entries[sentinel_key]
+        if network_posture == "ALLOW_LOOPBACK":
+            if not sentinel["can_exec"]:
+                raise MorayQuarantineError(
+                    f"Sentinel perm_flags (0x{sentinel['perm_flags']:02x}) missing MORAY_PERM_EXEC"
+                )
+            if sentinel["can_socket"]:
+                raise MorayQuarantineError(
+                    f"Sentinel perm_flags (0x{sentinel['perm_flags']:02x}) improperly has MORAY_PERM_SOCKET under ALLOW_LOOPBACK!"
+                )
+        elif network_posture == "REQUIRE_WAN":
+            if not sentinel["can_socket"]:
+                raise MorayQuarantineError(
+                    f"Sentinel perm_flags (0x{sentinel['perm_flags']:02x}) missing MORAY_PERM_SOCKET under REQUIRE_WAN!"
+                )
+
+        # 2. Verify Allowed Executables
+        missing_comms = []
+        mismatched_comms = []
+        for comm in allowed_comms:
+            comm_key = comm[:15]
+            if comm_key not in live_entries:
+                missing_comms.append(comm_key)
+            else:
+                entry = live_entries[comm_key]
+                if not entry["can_exec"]:
+                    mismatched_comms.append(f"{comm_key}: missing MORAY_PERM_EXEC")
+                if network_posture == "ALLOW_LOOPBACK" and entry["can_socket"]:
+                    mismatched_comms.append(
+                        f"{comm_key}: improperly granted MORAY_PERM_SOCKET under ALLOW_LOOPBACK"
+                    )
+
+        if missing_comms:
+            raise MorayQuarantineError(
+                f"Allowed comms missing from kernel boundary_map: {missing_comms}"
+            )
+        if mismatched_comms:
+            raise MorayQuarantineError(
+                f"Boundary permission mismatches in kernel boundary_map: {mismatched_comms}"
+            )
+
+        # 3. Verify Daemon Self Entry
+        if "morayd" in live_entries:
+            daemon_entry = live_entries["morayd"]
+            if not (daemon_entry["can_exec"] and daemon_entry["can_socket"]):
+                raise MorayQuarantineError(
+                    "Daemon entry 'morayd' missing MORAY_PERM_ALL in kernel map"
+                )
+
+        return {
+            "status": "verified",
+            "manifest_target": manifest.get("target_name", "unknown"),
+            "network_posture": network_posture,
+            "sentinel_flags": sentinel["perm_flags"],
+            "total_allowed_comms": len(allowed_comms),
+            "verified_in_kernel": len(live_entries),
+        }
+
 
 # Backward compatibility alias
 MorayQuarantineHook = MorayHook
@@ -1951,6 +2196,24 @@ def main() -> None:
         default=DEFAULT_CGROUP_PIN,
         help="Path to pinned cgroup map or mock file",
     )
+    parser.add_argument(
+        "--boundary-map-path",
+        type=str,
+        default=DEFAULT_BOUNDARY_PIN,
+        help="Path to pinned boundary map or mock file",
+    )
+    parser.add_argument(
+        "--list-boundary",
+        "--dump-boundary",
+        action="store_true",
+        help="List all entries in the autonomous boundary map",
+    )
+    parser.add_argument(
+        "--verify-boundary",
+        type=str,
+        metavar="MANIFEST_PATH",
+        help="Verify that the live in-kernel boundary map matches the given boundary manifest",
+    )
     parser.add_argument("--mock", action="store_true", help="Force mock testing mode")
     parser.add_argument("--json", action="store_true", help="Format output as structured JSON")
 
@@ -1962,6 +2225,7 @@ def main() -> None:
             events_path=args.events_path,
             xdp_map_path=args.xdp_map_path,
             cgroup_map_path=args.cgroup_map_path,
+            boundary_map_path=args.boundary_map_path,
             mock_mode=args.mock,
         )
 
@@ -2368,6 +2632,27 @@ def main() -> None:
                 print(json.dumps({"status": "xdp_flushed", "count": flushed}))
             else:
                 print(f"[!] BREAK-GLASS XDP FLUSH: Purged {flushed} XDP drop entries.")
+        elif args.list_boundary:
+            entries = hook.list_boundary()
+            if args.json:
+                print(json.dumps(entries, indent=2))
+            else:
+                print(f"[+] Total boundary entries: {len(entries)}")
+                for comm, info in sorted(entries.items()):
+                    exec_str = "EXEC" if info["can_exec"] else "NONE"
+                    sock_str = "|SOCKET" if info["can_socket"] else ""
+                    print(
+                        f"  - '{comm}': flags=0x{info['perm_flags']:02x} ({exec_str}{sock_str}), hits={info['hit_count']}"
+                    )
+        elif args.verify_boundary:
+            result = hook.verify_boundary_manifest(args.verify_boundary)
+            if args.json:
+                print(json.dumps(result, indent=2))
+            else:
+                print(f"[+] Boundary map VERIFIED against: {args.verify_boundary}")
+                print(f"    - Network Posture: {result['network_posture']}")
+                print(f"    - Total Allowed Comms: {result['total_allowed_comms']}")
+                print(f"    - Verified In Kernel: {result['verified_in_kernel']}")
         else:
             parser.print_help()
 
