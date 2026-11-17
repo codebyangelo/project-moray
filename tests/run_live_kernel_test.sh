@@ -608,7 +608,7 @@ fi
 # =========================================================================
 echo "[*] Step 46: Clean teardown of relaunched daemon..."
 kill -TERM "$NEW_DAEMON_PID"
-rm -f /tmp/victim_*
+rm -f /tmp/victim_*.ready /tmp/moray_test.sock
 sleep 1
 
 # =========================================================================
@@ -618,6 +618,8 @@ sleep 1
 # =========================================================================
 
 echo "[*] Step 47: Generating canonical Autonomous Boundary Manifest with ALLOW_LOOPBACK..."
+gcc -Wall -Wextra -O2 -std=c11 tests/victim_worker.c -o /tmp/victim_worker
+chmod +x /tmp/victim_worker
 cat << 'EOF' > /tmp/moray_boundary_live.json
 {
   "version": "1.0.0",

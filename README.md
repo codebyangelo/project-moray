@@ -1,7 +1,7 @@
 # Project Moray: OS-Level Ring 0 eBPF Containment Architecture
 
 [![CI: Build & Invariant Suite](https://github.com/codebyangelo/project-moray/actions/workflows/ci.yml/badge.svg)](https://github.com/codebyangelo/project-moray/actions/workflows/ci.yml)
-[![MicroVM: 46/46 KVM Steps](https://img.shields.io/badge/MicroVM-46%2F46%20KVM%20Steps-brightgreen.svg)](#-verification--claims-truth-matrix)
+[![MicroVM: 54/54 KVM Steps](https://img.shields.io/badge/MicroVM-54%2F54%20KVM%20Steps-brightgreen.svg)](#-verification--claims-truth-matrix)
 [![Tests: 141 Passed](https://img.shields.io/badge/Tests-141%20Passed-brightgreen.svg)](#-building--running)
 [![License: GPL-2.0](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](LICENSE)
 [![Kernel: eBPF LSM | XDP](https://img.shields.io/badge/Kernel-eBPF%20LSM%20%7C%20XDP-green.svg)](#-quick-architecture-overview)
@@ -71,8 +71,8 @@ In adherence to the **Provenance & Chronology Invariant ($I_6$)** and strict hum
 | | **Binary Struct & Layout Alignment** | **Verified (Hermetic)** | Strict C `sizeof()` and offset assertions matching Python `ctypes` across architectures (`tests/test_struct_layout.c`). |
 | | **Sovereign Boundary Profiler** | **Verified (Hermetic)** | Zero-dependency AST/toolchain analysis producing valid `moray_boundary.json` (`tests/test_autonomous_boundary_e2e.py`). |
 | | **Daemon Auto-Harden Startup** | **Verified (Hermetic)** | Ingests manifest, seeds `moray_boundary_map`, enforces strict opt-in discipline (`tests/test_autonomous_boundary_e2e.py`). |
+| | **Autonomous Boundary in MicroVM (`ALLOW_LOOPBACK`)** | **Verified (Ring 0)** | Real manifest loaded; pinned `boundary_map` verified; listed execution passed, unlisted binary intercepted with `-EPERM` & auto-quarantined; loopback allowed and WAN severed under `ALLOW_LOOPBACK` (`tests/run_live_kernel_test.sh` Steps 47–54). |
 | **Tier 2: Partially Tested / Mock-Emulated** | **Cross-Repo Octopus Audit** | **Conditional CI** | Verified when Project Octopus sibling workspace is present; safely skipped without error in standalone CI runners. |
-| | **Autonomous Boundary in MicroVM (`ALLOW_LOOPBACK`)** | **Staged (Domain 7)** | Hermetic tests verified (141 passed); live microVM test suite extended with Domain 7 (Steps 47–54) staging real manifest loading, map inspection, listed/unlisted execution, and loopback/WAN enforcement pending GitHub Actions execution. |
 | **Tier 3: Claimed in Threat Model / Roadmap** | **VFS Path Unlink Protection** | **In Progress (Phase 8)**| Pinned maps protected by OS permissions (`0700` root) and `lsm/bpf`; dedicated VFS LSM hooks (`file_unlink`) scheduled for Phase 8. |
 | | **IPv6 Wire-Rate Drops** | **Roadmap** | `moray_xdp_drop_map` currently keys on `__u32` IPv4 addresses; IPv6 128-bit keying scheduled for future release. |
 | | **Deep Packet Inspection (DPI)** | **Deferred to L7** | Moray operates at L0/L3/L4; semantic payload analysis and regex inspection are delegated to Project Lobster. |
@@ -93,7 +93,7 @@ In adherence to the **Provenance & Chronology Invariant ($I_6$)** and strict hum
 * **`moray_boundary.json`**: Machine-readable boundary specification for autonomous zero-config hardening.
 * **`tests/`**: Comprehensive test suite comprising:
   - 141 hermetic unit tests verifying layout, policy engine, XDP filter, cgroups, network policy, and E2E pipeline.
-  - 46 live Ring 0 kernel verification steps running inside a real KVM microVM (`run_live_kernel_test.sh`), with Domain 7 (Steps 47–54) staged for CI execution.
+  - 54 live Ring 0 kernel verification steps running inside a real KVM microVM (`run_live_kernel_test.sh`).
 
 ---
 

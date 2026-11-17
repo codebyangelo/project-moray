@@ -66,12 +66,29 @@ jobs:
 
     - name: Execute Live Ring 0 Test Suite in MicroVM
       run: |
+        set -o pipefail
         vng -v \
             -r "/boot/vmlinuz-$(uname -r)" \
             --append "lsm=landlock,lockdown,yama,bpf" \
             --user root \
             --cwd "$PWD" \
             --exec "$PWD/tests/run_live_kernel_test.sh" 2>&1 | tee kvm_microvm_test.log
+
+    - name: Enforce Ground Truth Invariant (Zero Fail-Green Gate)
+      run: |
+        if [ ! -f kvm_microvm_test.log ]; then
+          echo "[-] FATAL: kvm_microvm_test.log was not generated!"
+          exit 1
+        fi
+        if ! grep -q "ALL 54 LIVE RING 0 KERNEL TEST STEPS PASSED CLEANLY" kvm_microvm_test.log; then
+          echo "[-] FATAL: MicroVM test failed or did not complete all 54 steps cleanly!"
+          exit 1
+        fi
+        if grep -q "FATAL" kvm_microvm_test.log; then
+          echo "[-] FATAL error detected in microvm test execution log!"
+          exit 1
+        fi
+        echo "[+] Ground Truth Invariant Verified: All 54 steps completed without error."
 
     - name: Archive KVM Execution Logs & Diagnostics
       if: always()
