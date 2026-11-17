@@ -1984,11 +1984,10 @@ class MorayHook:
                 raise MorayQuarantineError(
                     f"Sentinel perm_flags (0x{sentinel['perm_flags']:02x}) improperly has MORAY_PERM_SOCKET under ALLOW_LOOPBACK!"
                 )
-        elif network_posture == "REQUIRE_WAN":
-            if not sentinel["can_socket"]:
-                raise MorayQuarantineError(
-                    f"Sentinel perm_flags (0x{sentinel['perm_flags']:02x}) missing MORAY_PERM_SOCKET under REQUIRE_WAN!"
-                )
+        elif network_posture == "REQUIRE_WAN" and not sentinel["can_socket"]:
+            raise MorayQuarantineError(
+                f"Sentinel perm_flags (0x{sentinel['perm_flags']:02x}) missing MORAY_PERM_SOCKET under REQUIRE_WAN!"
+            )
 
         # 2. Verify Allowed Executables
         missing_comms = []
