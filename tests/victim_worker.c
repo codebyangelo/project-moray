@@ -200,6 +200,9 @@ int main(int argc, char **argv) {
         if (ret == 0 || (ret < 0 && err != EPERM && err != EACCES)) {
             return 45; /* Success: Loopback connect permitted past LSM */
         }
+        if (ret < 0 && (err == EPERM || err == EACCES)) {
+            return 48; /* Blocked: Loopback connect severed by LSM with -EPERM */
+        }
         return 1;
     } else if (strcmp(argv[1], "--wait-and-connect-unix") == 0 || strcmp(argv[1], "--connect-unix") == 0) {
         const char *sock_path = "/tmp/moray_test.sock";
@@ -235,10 +238,15 @@ int main(int argc, char **argv) {
         if (ret == 0 || (ret < 0 && err != EPERM && err != EACCES)) {
             return 46; /* Success: Unix domain socket permitted past LSM */
         }
+        if (ret < 0 && (err == EPERM || err == EACCES)) {
+            return 49; /* Blocked: UNIX domain socket severed by LSM with -EPERM */
+        }
         return 1;
-    } else if (strcmp(argv[1], "--wait-and-assert-loopback-blocked") == 0) {
+    } else if (strcmp(argv[1], "--wait-and-assert-loopback-blocked") == 0 || strcmp(argv[1], "--assert-loopback-blocked") == 0) {
         int port = (argc > 2) ? atoi(argv[2]) : 80;
-        wait_for_strike();
+        if (strcmp(argv[1], "--wait-and-assert-loopback-blocked") == 0) {
+            wait_for_strike();
+        }
 
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) {

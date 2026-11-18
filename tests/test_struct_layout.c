@@ -48,6 +48,7 @@ int main(void) {
     assert(offsetof(struct moray_boundary_entry, hit_count) == 8);
     assert(MORAY_PERM_EXEC == 0x01);
     assert(MORAY_PERM_SOCKET == 0x02);
+    assert(MORAY_PERM_LOOPBACK == 0x04);
     assert(MORAY_PERM_ALL == 0xFF);
 
     printf("[+] All struct layout and alignment assertions PASSED cleanly.\n");

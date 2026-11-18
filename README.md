@@ -73,6 +73,7 @@ In adherence to the **Provenance & Chronology Invariant ($I_6$)** and strict hum
 | | **Daemon Auto-Harden Startup** | **Verified (Hermetic)** | Ingests manifest, seeds `moray_boundary_map`, enforces strict opt-in discipline (`tests/test_autonomous_boundary_e2e.py`). |
 | | **Autonomous Boundary in MicroVM (`ALLOW_LOOPBACK`)** | **Verified (Ring 0)** | Real manifest loaded; pinned `boundary_map` verified; listed execution passed, unlisted binary intercepted with `-EPERM` & auto-quarantined; loopback allowed and WAN severed under `ALLOW_LOOPBACK` (`tests/run_live_kernel_test.sh` Steps 47–54). |
 | **Tier 2: Partially Tested / Mock-Emulated** | **Cross-Repo Octopus Audit** | **Conditional CI** | Verified when Project Octopus sibling workspace is present; safely skipped without error in standalone CI runners. |
+| | **Autonomous Boundary in MicroVM (`DENY_ALL_NET`)** | **Staged (Domain 8)** | Domain 8 (Steps 55–62) implemented and passing hermetic verification; staged in `tests/run_live_kernel_test.sh` awaiting GitHub Actions CI verification. |
 | **Tier 3: Claimed in Threat Model / Roadmap** | **VFS Path Unlink Protection** | **In Progress (Phase 8)**| Pinned maps protected by OS permissions (`0700` root) and `lsm/bpf`; dedicated VFS LSM hooks (`file_unlink`) scheduled for Phase 8. |
 | | **IPv6 Wire-Rate Drops** | **Roadmap** | `moray_xdp_drop_map` currently keys on `__u32` IPv4 addresses; IPv6 128-bit keying scheduled for future release. |
 | | **Deep Packet Inspection (DPI)** | **Deferred to L7** | Moray operates at L0/L3/L4; semantic payload analysis and regex inspection are delegated to Project Lobster. |
@@ -93,7 +94,7 @@ In adherence to the **Provenance & Chronology Invariant ($I_6$)** and strict hum
 * **`moray_boundary.json`**: Machine-readable boundary specification for autonomous zero-config hardening.
 * **`tests/`**: Comprehensive test suite comprising:
   - 141 hermetic unit tests verifying layout, policy engine, XDP filter, cgroups, network policy, and E2E pipeline.
-  - 54 live Ring 0 kernel verification steps running inside a real KVM microVM (`run_live_kernel_test.sh`).
+  - 54 live Ring 0 kernel verification steps verified on main (Steps 55–62 staged in Domain 8 for `DENY_ALL_NET` expansion to 62 steps).
 
 ---
 
