@@ -18,7 +18,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from bridge.lobster_hook import (
+from bridge.moray_hook import (
     FAIL_CLOSED_EXIT_CODE,
     MAX_MAP_FILE_BYTES,
     MORAY_ACT_BLOCK_EXEC,
@@ -261,7 +261,7 @@ class TestCgroupCliVerbs:
         res_q = subprocess.run(
             [
                 sys.executable,
-                "bridge/lobster_hook.py",
+                "bridge/moray_hook.py",
                 "--quarantine-cgroup",
                 "8888",
                 "--cgroup-map-path",
@@ -284,7 +284,7 @@ class TestCgroupCliVerbs:
         res_s = subprocess.run(
             [
                 sys.executable,
-                "bridge/lobster_hook.py",
+                "bridge/moray_hook.py",
                 "--cgroup-status",
                 "8888",
                 "--cgroup-map-path",
@@ -306,7 +306,7 @@ class TestCgroupCliVerbs:
         res_r = subprocess.run(
             [
                 sys.executable,
-                "bridge/lobster_hook.py",
+                "bridge/moray_hook.py",
                 "--release-cgroup",
                 "8888",
                 "--cgroup-map-path",
@@ -328,7 +328,7 @@ class TestCgroupCliVerbs:
         res = subprocess.run(
             [
                 sys.executable,
-                "bridge/lobster_hook.py",
+                "bridge/moray_hook.py",
                 "--quarantine-cgroup",
                 "7777",
                 "--cgroup-map-path",
@@ -353,7 +353,7 @@ class TestCgroupCliVerbs:
         res = subprocess.run(
             [
                 sys.executable,
-                "bridge/lobster_hook.py",
+                "bridge/moray_hook.py",
                 "--flush-cgroups",
                 "--cgroup-map-path",
                 str(mock_map),

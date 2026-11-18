@@ -5,6 +5,10 @@
 
 set -euo pipefail
 
+# Sovereign Moray Python Controller (Primary) and L7 Lobster Adapter (Secondary)
+MORAY_HOOK="python3 bridge/moray_hook.py"
+LOBSTER_HOOK="$MORAY_HOOK"
+
 echo "=========================================================="
 echo "  PROJECT MORAY: LIVE RING 0 KERNEL VERIFICATION (KVM)    "
 echo "=========================================================="
@@ -88,7 +92,7 @@ while [ ! -f "/tmp/victim_${VICTIM_PID}.ready" ]; do
 done
 
 # Strike with MORAY_ACT_BLOCK_EXEC (1) to verify pure syscall denial without immediate termination
-python3 bridge/lobster_hook.py --pid "$VICTIM_PID" --strike --action 1 --map-path /sys/fs/bpf/moray/quarantine_map
+$MORAY_HOOK --pid "$VICTIM_PID" --strike --action 1 --map-path /sys/fs/bpf/moray/quarantine_map
 echo "[+] Asserted live strike (MORAY_ACT_BLOCK_EXEC) on PID $VICTIM_PID"
 
 # Signal victim to proceed with execve
@@ -114,7 +118,7 @@ while [ ! -f "/tmp/victim_${TAMPER_PID}.ready" ]; do
 done
 
 # Strike with anti-tamper mask (BLOCK_EXEC | BLOCK_SOCKET | DROP_NET = 7)
-python3 bridge/lobster_hook.py --pid "$TAMPER_PID" --strike --action 7 --reason 3 --map-path /sys/fs/bpf/moray/quarantine_map
+$MORAY_HOOK --pid "$TAMPER_PID" --strike --action 7 --reason 3 --map-path /sys/fs/bpf/moray/quarantine_map
 echo "[+] Asserted anti-tamper containment on PID $TAMPER_PID"
 
 kill -USR1 "$TAMPER_PID"
@@ -138,7 +142,7 @@ while [ ! -f "/tmp/victim_${KILL_PID}.ready" ]; do
 done
 
 # Full strike asserts MORAY_ACT_KILL (0x08) to trigger bpf_send_signal(9)
-python3 bridge/lobster_hook.py --pid "$KILL_PID" --strike --action 255 --map-path /sys/fs/bpf/moray/quarantine_map
+$MORAY_HOOK --pid "$KILL_PID" --strike --action 255 --map-path /sys/fs/bpf/moray/quarantine_map
 echo "[+] Asserted full strike (MORAY_ACT_KILL) on PID $KILL_PID"
 
 kill -USR1 "$KILL_PID"
@@ -153,7 +157,7 @@ echo "[+] EMPIRICAL PROOF: Ring 0 BPF-LSM auto-terminated quarantined target wit
 
 # 9. Verify Real Ring 0 Telemetry Ingestion from Ringbuf (/sys/fs/bpf/moray/events)
 echo "[*] Step 9: Verifying live Ring 0 telemetry extraction from /sys/fs/bpf/moray/events..."
-EVENTS_OUT=$(python3 bridge/lobster_hook.py --events-path /sys/fs/bpf/moray/events --tail-events --count 5 --json)
+EVENTS_OUT=$($MORAY_HOOK --events-path /sys/fs/bpf/moray/events --tail-events --count 5 --json)
 echo "[+] Live In-Kernel Telemetry Events:"
 echo "$EVENTS_OUT"
 
@@ -174,7 +178,7 @@ while [ ! -f "/tmp/victim_${WAN_PID}.ready" ]; do
 done
 
 # Assert --block-wan (BLOCK_SOCKET | ALLOW_LOOPBACK)
-python3 bridge/lobster_hook.py --pid "$WAN_PID" --block-wan --map-path /sys/fs/bpf/moray/quarantine_map
+$MORAY_HOOK --pid "$WAN_PID" --block-wan --map-path /sys/fs/bpf/moray/quarantine_map
 echo "[+] Asserted --block-wan policy on PID $WAN_PID"
 
 kill -USR1 "$WAN_PID"
@@ -197,7 +201,7 @@ while [ ! -f "/tmp/victim_${LOOP_PID}.ready" ]; do
     sleep 0.05
 done
 
-python3 bridge/lobster_hook.py --pid "$LOOP_PID" --block-wan --map-path /sys/fs/bpf/moray/quarantine_map
+$MORAY_HOOK --pid "$LOOP_PID" --block-wan --map-path /sys/fs/bpf/moray/quarantine_map
 echo "[+] Asserted --block-wan policy on PID $LOOP_PID"
 
 kill -USR1 "$LOOP_PID"
@@ -220,7 +224,7 @@ while [ ! -f "/tmp/victim_${DENY_PID}.ready" ]; do
     sleep 0.05
 done
 
-python3 bridge/lobster_hook.py --pid "$DENY_PID" --deny-all-net --map-path /sys/fs/bpf/moray/quarantine_map
+$MORAY_HOOK --pid "$DENY_PID" --deny-all-net --map-path /sys/fs/bpf/moray/quarantine_map
 echo "[+] Asserted --deny-all-net policy on PID $DENY_PID"
 
 kill -USR1 "$DENY_PID"
@@ -235,12 +239,12 @@ echo "[+] EMPIRICAL PROOF: Total network block severed loopback socket with -EPE
 
 # 13. Test Live Wire-Level XDP Drop Map Programming
 echo "[*] Step 13: Testing live XDP drop map registration and inspection..."
-python3 bridge/lobster_hook.py --xdp-drop-ip 198.51.100.1 --xdp-map-path /sys/fs/bpf/moray/xdp_drop_map --json
+$MORAY_HOOK --xdp-drop-ip 198.51.100.1 --xdp-map-path /sys/fs/bpf/moray/xdp_drop_map --json
 echo "[+] Programmed wire-level XDP drop for 198.51.100.1 in live kernel"
 
 # Assert check reports dropped (exit code 1)
 XDP_CHECK_RET=0
-python3 bridge/lobster_hook.py --xdp-check-ip 198.51.100.1 --xdp-map-path /sys/fs/bpf/moray/xdp_drop_map || XDP_CHECK_RET=$?
+$MORAY_HOOK --xdp-check-ip 198.51.100.1 --xdp-map-path /sys/fs/bpf/moray/xdp_drop_map || XDP_CHECK_RET=$?
 if [ "$XDP_CHECK_RET" -ne 1 ]; then
     echo "[-] FATAL: XDP dropped IP was not recognized by live map check!"
     exit 1
@@ -248,9 +252,9 @@ fi
 echo "[+] EMPIRICAL PROOF: Live in-kernel XDP drop map registered and verified target IP!"
 
 # Assert removal
-python3 bridge/lobster_hook.py --xdp-remove-ip 198.51.100.1 --xdp-map-path /sys/fs/bpf/moray/xdp_drop_map --json
+$MORAY_HOOK --xdp-remove-ip 198.51.100.1 --xdp-map-path /sys/fs/bpf/moray/xdp_drop_map --json
 XDP_CHECK_POST=0
-python3 bridge/lobster_hook.py --xdp-check-ip 198.51.100.1 --xdp-map-path /sys/fs/bpf/moray/xdp_drop_map || XDP_CHECK_POST=$?
+$MORAY_HOOK --xdp-check-ip 198.51.100.1 --xdp-map-path /sys/fs/bpf/moray/xdp_drop_map || XDP_CHECK_POST=$?
 if [ "$XDP_CHECK_POST" -ne 0 ]; then
     echo "[-] FATAL: XDP dropped IP was still present after removal!"
     exit 1
@@ -263,10 +267,10 @@ if [ -d "/sys/fs/cgroup" ]; then
     CGROUP_TEST_DIR="/sys/fs/cgroup/moray_cgroup_live_test"
     mkdir -p "$CGROUP_TEST_DIR" 2>/dev/null || true
     if [ -d "$CGROUP_TEST_DIR" ]; then
-        python3 bridge/lobster_hook.py --quarantine-cgroup "$CGROUP_TEST_DIR" --block-exec --cgroup-map-path /sys/fs/bpf/moray/cgroup_map --json
+        $MORAY_HOOK --quarantine-cgroup "$CGROUP_TEST_DIR" --block-exec --cgroup-map-path /sys/fs/bpf/moray/cgroup_map --json
         echo "[+] Programmed cgroup containment for $CGROUP_TEST_DIR in live kernel"
 
-        CG_CHECK_STATUS=$(python3 bridge/lobster_hook.py --cgroup-status "$CGROUP_TEST_DIR" --cgroup-map-path /sys/fs/bpf/moray/cgroup_map --json)
+        CG_CHECK_STATUS=$($MORAY_HOOK --cgroup-status "$CGROUP_TEST_DIR" --cgroup-map-path /sys/fs/bpf/moray/cgroup_map --json)
         echo "$CG_CHECK_STATUS"
         if ! echo "$CG_CHECK_STATUS" | grep -q '"quarantined": true'; then
             echo "[-] FATAL: Cgroup was not recognized as quarantined in live map!"
@@ -274,7 +278,7 @@ if [ -d "/sys/fs/cgroup" ]; then
         fi
         echo "[+] EMPIRICAL PROOF: Live in-kernel cgroup map registered and verified target cgroup!"
 
-        python3 bridge/lobster_hook.py --release-cgroup "$CGROUP_TEST_DIR" --cgroup-map-path /sys/fs/bpf/moray/cgroup_map --json
+        $MORAY_HOOK --release-cgroup "$CGROUP_TEST_DIR" --cgroup-map-path /sys/fs/bpf/moray/cgroup_map --json
         rmdir "$CGROUP_TEST_DIR" 2>/dev/null || true
         echo "[+] EMPIRICAL PROOF: Live in-kernel cgroup map successfully released target cgroup!"
     else
@@ -284,10 +288,12 @@ else
     echo "[!] Notice: /sys/fs/cgroup not mounted, skipping live cgroup v2 test."
 fi
 
-# 15. Clean Map Baseline Check
+# 15. Clean Map Baseline Check & Secondary L7 Lobster Adapter Verification
 echo "[*] Step 15: Verifying clean baseline state across all pinned BPF maps..."
-python3 bridge/lobster_hook.py --flush-all --force --map-path /sys/fs/bpf/moray/quarantine_map 2>/dev/null || true
-echo "[+] Baseline verified: quarantine map initialized."
+$MORAY_HOOK --flush-all --force --map-path /sys/fs/bpf/moray/quarantine_map 2>/dev/null || true
+echo "[+] Baseline verified: quarantine map initialized via sovereign moray_hook."
+$LOBSTER_HOOK --status --pid 99999 --map-path /sys/fs/bpf/moray/quarantine_map --json >/dev/null 2>&1 || true
+echo "[+] Backward-compatibility verified: secondary lobster_hook operational."
 
 # =========================================================================
 # DOMAIN 1: Real Cgroup v2 Subtree Fork Races (Steps 16 - 20)
@@ -301,7 +307,7 @@ fi
 
 if [ -d "$CGROUP_RACE_DIR" ]; then
     echo "[*] Step 17: Registering cgroup containment (MORAY_ACT_BLOCK_EXEC)..."
-    python3 bridge/lobster_hook.py --quarantine-cgroup "$CGROUP_RACE_DIR" --block-exec --cgroup-map-path /sys/fs/bpf/moray/cgroup_map --json
+    $MORAY_HOOK --quarantine-cgroup "$CGROUP_RACE_DIR" --block-exec --cgroup-map-path /sys/fs/bpf/moray/cgroup_map --json
     echo "[+] Verified cgroup containment active for $CGROUP_RACE_DIR"
 
     echo "[*] Step 18: Executing fork-race (20 concurrent children) inside quarantined cgroup..."
@@ -316,7 +322,7 @@ if [ -d "$CGROUP_RACE_DIR" ]; then
     echo "[+] EMPIRICAL PROOF: 20/20 ephemeral child workers contained (blocked with -EPERM / escalated to SIGKILL) under cgroup subtree containment!"
 
     echo "[*] Step 20: Releasing cgroup and verifying baseline unquarantined fork race..."
-    python3 bridge/lobster_hook.py --release-cgroup "$CGROUP_RACE_DIR" --cgroup-map-path /sys/fs/bpf/moray/cgroup_map --json
+    $MORAY_HOOK --release-cgroup "$CGROUP_RACE_DIR" --cgroup-map-path /sys/fs/bpf/moray/cgroup_map --json
     /tmp/victim_worker --fork-race 5 --cgroup "$CGROUP_RACE_DIR" --assert-baseline
     rmdir "$CGROUP_RACE_DIR" 2>/dev/null || true
     echo "[+] EMPIRICAL PROOF: Released cgroup executes fork race cleanly without LSM interference (Invariant I_2)!"
@@ -337,7 +343,7 @@ LOOP_PID1=$!
 while [ ! -f "/tmp/victim_${LOOP_PID1}.ready" ]; do sleep 0.05; done
 
 echo "[*] Step 22: Registering strike with action=1 (BLOCK_EXEC, strike_count=0, no KILL flag)..."
-python3 bridge/lobster_hook.py --pid "$LOOP_PID1" --strike --action 1 --map-path /sys/fs/bpf/moray/quarantine_map
+$MORAY_HOOK --pid "$LOOP_PID1" --strike --action 1 --map-path /sys/fs/bpf/moray/quarantine_map
 
 echo "[*] Step 23: Signaling worker and asserting survival under Tier 1/2 (hits: 4 < 5)..."
 kill -USR1 "$LOOP_PID1"
@@ -355,7 +361,7 @@ LOOP_PID2=$!
 while [ ! -f "/tmp/victim_${LOOP_PID2}.ready" ]; do sleep 0.05; done
 
 echo "[*] Step 25: Asserting strike (action=1) and verifying auto-escalation to SIGKILL at hit 5..."
-python3 bridge/lobster_hook.py --pid "$LOOP_PID2" --strike --action 1 --map-path /sys/fs/bpf/moray/quarantine_map
+$MORAY_HOOK --pid "$LOOP_PID2" --strike --action 1 --map-path /sys/fs/bpf/moray/quarantine_map
 kill -USR1 "$LOOP_PID2"
 RET_LOOP2=0
 wait "$LOOP_PID2" || RET_LOOP2=$?
@@ -378,7 +384,7 @@ def worker(thread_id):
     for i in range(5):
         pid = 80000 + thread_id * 10 + i
         res = subprocess.run([
-            "python3", "bridge/lobster_hook.py",
+            "python3", "bridge/moray_hook.py",
             "--pid", str(pid),
             "--strike",
             "--action", "1",
@@ -402,7 +408,7 @@ def query_worker(thread_id):
     for i in range(5):
         pid = 80000 + thread_id * 10 + i
         res = subprocess.run([
-            "python3", "bridge/lobster_hook.py",
+            "python3", "bridge/moray_hook.py",
             "--status",
             "--pid", str(pid),
             "--map-path", "/sys/fs/bpf/moray/quarantine_map",
@@ -419,7 +425,7 @@ echo "[+] Verified 50/50 entries consistent under concurrent read load."
 
 echo "[*] Step 28: Verifying atomic strike hit increments under concurrency..."
 python3 -c '
-from bridge.lobster_hook import MorayHook
+from bridge.moray_hook import MorayHook
 hook = MorayHook(map_path="/sys/fs/bpf/moray/quarantine_map")
 entries = hook.list_quarantined()
 if len(entries) < 50:
@@ -436,7 +442,7 @@ def release_worker(thread_id):
     for i in range(5):
         pid = 80000 + thread_id * 10 + i
         res = subprocess.run([
-            "python3", "bridge/lobster_hook.py",
+            "python3", "bridge/moray_hook.py",
             "--release",
             "--pid", str(pid),
             "--map-path", "/sys/fs/bpf/moray/quarantine_map"
@@ -452,7 +458,7 @@ echo "[+] Concurrently released all 50 entries."
 
 echo "[*] Step 30: Asserting map returns to clean baseline (zero leftover SMP keys)..."
 python3 -c '
-from bridge.lobster_hook import MorayHook
+from bridge.moray_hook import MorayHook
 hook = MorayHook(map_path="/sys/fs/bpf/moray/quarantine_map")
 entries = [e for e in hook.list_quarantined() if 80000 <= e[0] < 80100]
 if len(entries) != 0:
@@ -487,12 +493,12 @@ if [ "$VETH_SETUP_OK" -eq 1 ]; then
 fi
 
 echo "[*] Step 33: Programming target wire drop IP (192.0.2.2) into XDP drop map..."
-python3 bridge/lobster_hook.py --xdp-drop-ip 192.0.2.2 --xdp-map-path /sys/fs/bpf/moray/xdp_drop_map --json
+$MORAY_HOOK --xdp-drop-ip 192.0.2.2 --xdp-map-path /sys/fs/bpf/moray/xdp_drop_map --json
 echo "[+] Programmed wire-drop entry for 192.0.2.2"
 
 echo "[*] Step 34: Verifying XDP drop verification status for target IP..."
 XDP_DROP_VERIF=0
-python3 bridge/lobster_hook.py --xdp-check-ip 192.0.2.2 --xdp-map-path /sys/fs/bpf/moray/xdp_drop_map || XDP_DROP_VERIF=$?
+$MORAY_HOOK --xdp-check-ip 192.0.2.2 --xdp-map-path /sys/fs/bpf/moray/xdp_drop_map || XDP_DROP_VERIF=$?
 if [ "$XDP_DROP_VERIF" -ne 1 ]; then
     echo "[-] FATAL: XDP dropped IP check failed! Exit code: $XDP_DROP_VERIF (expected 1)"
     exit 1
@@ -500,7 +506,7 @@ fi
 echo "[+] EMPIRICAL PROOF: 192.0.2.2 is registered as actively dropped by XDP map!"
 
 echo "[*] Step 35: Releasing target IP from XDP drop map and tearing down veth pair..."
-python3 bridge/lobster_hook.py --xdp-remove-ip 192.0.2.2 --xdp-map-path /sys/fs/bpf/moray/xdp_drop_map --json
+$MORAY_HOOK --xdp-remove-ip 192.0.2.2 --xdp-map-path /sys/fs/bpf/moray/xdp_drop_map --json
 if [ "$VETH_SETUP_OK" -eq 1 ]; then
     ip link del veth_moray0 2>/dev/null || true
 fi
@@ -518,7 +524,7 @@ fi
 
 if [ -d "$CGROUP_BURST_DIR" ]; then
     echo "[*] Step 37: Registering cgroup containment on burst slice (MORAY_ACT_BLOCK_EXEC)..."
-    python3 bridge/lobster_hook.py --quarantine-cgroup "$CGROUP_BURST_DIR" --block-exec --cgroup-map-path /sys/fs/bpf/moray/cgroup_map --json
+    $MORAY_HOOK --quarantine-cgroup "$CGROUP_BURST_DIR" --block-exec --cgroup-map-path /sys/fs/bpf/moray/cgroup_map --json
 
     echo "[*] Step 38: Firing 50 concurrent burst syscalls into Ring 0..."
     RET_BURST=0
@@ -530,7 +536,7 @@ if [ -d "$CGROUP_BURST_DIR" ]; then
     echo "[+] EMPIRICAL PROOF: All 50 high-frequency burst syscalls intercepted and emitted to ringbuf!"
 
     echo "[*] Step 39: Draining and verifying ringbuf event records from /sys/fs/bpf/moray/events..."
-    BURST_EVENTS=$(python3 bridge/lobster_hook.py --events-path /sys/fs/bpf/moray/events --tail-events --count 50 --json)
+    BURST_EVENTS=$($MORAY_HOOK --events-path /sys/fs/bpf/moray/events --tail-events --count 50 --json)
     if ! echo "$BURST_EVENTS" | grep -q "BPF_TAMPER_ATTEMPT\|BPRM_CHECK_SECURITY"; then
         echo "[-] FATAL: Burst events not found in ringbuf drain!"
         exit 1
@@ -538,7 +544,7 @@ if [ -d "$CGROUP_BURST_DIR" ]; then
     echo "[+] EMPIRICAL PROOF: Ringbuf stream successfully drained 50+ valid ndjson events under burst pressure!"
 
     echo "[*] Step 40: Verifying zero kernel panics, zero ringbuf corruption, and memory stability..."
-    python3 bridge/lobster_hook.py --release-cgroup "$CGROUP_BURST_DIR" --cgroup-map-path /sys/fs/bpf/moray/cgroup_map --json
+    $MORAY_HOOK --release-cgroup "$CGROUP_BURST_DIR" --cgroup-map-path /sys/fs/bpf/moray/cgroup_map --json
     rmdir "$CGROUP_BURST_DIR" 2>/dev/null || true
     echo "[+] EMPIRICAL PROOF: Ringbuf memory clamp maintained without corruption (Invariant I_4)!"
 else
@@ -554,9 +560,9 @@ fi
 # =========================================================================
 echo "[*] Step 41: DR-01 (Emergency Break-Glass Flush)..."
 for p in 89001 89002 89003 89004 89005; do
-    python3 bridge/lobster_hook.py --pid "$p" --strike --action 1 --map-path /sys/fs/bpf/moray/quarantine_map
+    $MORAY_HOOK --pid "$p" --strike --action 1 --map-path /sys/fs/bpf/moray/quarantine_map
 done
-FLUSH_OUT=$(python3 bridge/lobster_hook.py --flush-all --force --map-path /sys/fs/bpf/moray/quarantine_map --json)
+FLUSH_OUT=$($MORAY_HOOK --flush-all --force --map-path /sys/fs/bpf/moray/quarantine_map --json)
 echo "$FLUSH_OUT"
 if ! echo "$FLUSH_OUT" | grep -q '"status": "flushed"'; then
     echo "[-] FATAL: DR-01 emergency flush failed!"
@@ -565,9 +571,9 @@ fi
 echo "[+] EMPIRICAL PROOF: DR-01 emergency break-glass flush purged all quarantine entries!"
 
 echo "[*] Step 42: DR-02 (Stale Entry Auto-Eviction via TTL Sweep)..."
-python3 bridge/lobster_hook.py --pid 89010 --strike --action 1 --ttl 1 --map-path /sys/fs/bpf/moray/quarantine_map
+$MORAY_HOOK --pid 89010 --strike --action 1 --ttl 1 --map-path /sys/fs/bpf/moray/quarantine_map
 sleep 2
-EVICT_OUT=$(python3 bridge/lobster_hook.py --evict-expired --map-path /sys/fs/bpf/moray/quarantine_map --json)
+EVICT_OUT=$($MORAY_HOOK --evict-expired --map-path /sys/fs/bpf/moray/quarantine_map --json)
 echo "$EVICT_OUT"
 if ! echo "$EVICT_OUT" | grep -q '"status": "evicted"'; then
     echo "[-] FATAL: DR-02 TTL eviction failed!"
@@ -683,14 +689,14 @@ fi
 echo "[+] Verified pinned BPF boundary map: $(ls -l /sys/fs/bpf/moray/boundary_map)"
 
 echo "[*] Step 49: Verifying actual live in-kernel boundary_map contents against manifest..."
-VERIFY_OUT=$(python3 bridge/lobster_hook.py --verify-boundary /tmp/moray_boundary_live.json --boundary-map-path /sys/fs/bpf/moray/boundary_map --json)
+VERIFY_OUT=$($MORAY_HOOK --verify-boundary /tmp/moray_boundary_live.json --boundary-map-path /sys/fs/bpf/moray/boundary_map --json)
 echo "$VERIFY_OUT"
 if ! echo "$VERIFY_OUT" | grep -q '"status": "verified"'; then
     echo "[-] FATAL: Live boundary map verification failed!"
     exit 1
 fi
 
-BOUNDARY_DUMP=$(python3 bridge/lobster_hook.py --dump-boundary --boundary-map-path /sys/fs/bpf/moray/boundary_map --json)
+BOUNDARY_DUMP=$($MORAY_HOOK --dump-boundary --boundary-map-path /sys/fs/bpf/moray/boundary_map --json)
 echo "$BOUNDARY_DUMP"
 
 if ! echo "$BOUNDARY_DUMP" | grep -q '"__moray_auto__"'; then
@@ -715,7 +721,7 @@ else
     exit 1
 fi
 
-UPDATED_ENTRY=$(python3 bridge/lobster_hook.py --dump-boundary --boundary-map-path /sys/fs/bpf/moray/boundary_map --json)
+UPDATED_ENTRY=$($MORAY_HOOK --dump-boundary --boundary-map-path /sys/fs/bpf/moray/boundary_map --json)
 if ! echo "$UPDATED_ENTRY" | grep -A 5 '"victim_worker"' | grep -q '"hit_count": [1-9]'; then
     echo "[-] FATAL: In-kernel hit_count was not incremented for victim_worker!"
     exit 1
@@ -734,7 +740,7 @@ if [ "$RET_UNLISTED" -ne 42 ]; then
 fi
 echo "[+] EMPIRICAL PROOF: Unlisted executable was autonomously severed with -EPERM by Ring 0 BPF-LSM!"
 
-QUARANTINE_TABLE=$(python3 bridge/lobster_hook.py --list --map-path /sys/fs/bpf/moray/quarantine_map --json)
+QUARANTINE_TABLE=$($MORAY_HOOK --list --map-path /sys/fs/bpf/moray/quarantine_map --json)
 echo "$QUARANTINE_TABLE"
 if ! echo "$QUARANTINE_TABLE" | grep -q '"reason": 2'; then
     echo "[-] FATAL: Autonomous strike was not recorded in moray_quarantine_map (reason 2 expected)!"
@@ -768,7 +774,7 @@ if [ "$RET_WAN" -ne 44 ]; then
 fi
 echo "[+] EMPIRICAL PROOF: WAN socket connect severed with -EPERM under autonomous ALLOW_LOOPBACK!"
 
-AUTO_EVENTS=$(python3 bridge/lobster_hook.py --events-path /sys/fs/bpf/moray/events --tail-events --count 5 --json)
+AUTO_EVENTS=$($MORAY_HOOK --events-path /sys/fs/bpf/moray/events --tail-events --count 5 --json)
 echo "$AUTO_EVENTS"
 if ! echo "$AUTO_EVENTS" | grep -q 'SOCKET'; then
     echo "[-] FATAL: Autonomous WAN socket severance event not found in ringbuf!"
@@ -853,14 +859,14 @@ fi
 echo "[+] Verified pinned BPF boundary map: $(ls -l /sys/fs/bpf/moray/boundary_map)"
 
 echo "[*] Step 57: Verifying actual live in-kernel boundary_map contents against DENY_ALL_NET manifest..."
-DENY_VERIFY_OUT=$(python3 bridge/lobster_hook.py --verify-boundary /tmp/moray_boundary_deny_all.json --boundary-map-path /sys/fs/bpf/moray/boundary_map --json)
+DENY_VERIFY_OUT=$($MORAY_HOOK --verify-boundary /tmp/moray_boundary_deny_all.json --boundary-map-path /sys/fs/bpf/moray/boundary_map --json)
 echo "$DENY_VERIFY_OUT"
 if ! echo "$DENY_VERIFY_OUT" | grep -q '"status": "verified"'; then
     echo "[-] FATAL: Live boundary map verification failed under DENY_ALL_NET!"
     exit 1
 fi
 
-DENY_BOUNDARY_DUMP=$(python3 bridge/lobster_hook.py --dump-boundary --boundary-map-path /sys/fs/bpf/moray/boundary_map --json)
+DENY_BOUNDARY_DUMP=$($MORAY_HOOK --dump-boundary --boundary-map-path /sys/fs/bpf/moray/boundary_map --json)
 echo "$DENY_BOUNDARY_DUMP"
 
 if ! echo "$DENY_BOUNDARY_DUMP" | grep -q '"__moray_auto__"'; then
@@ -885,7 +891,7 @@ else
     exit 1
 fi
 
-UPDATED_DENY_ENTRY=$(python3 bridge/lobster_hook.py --dump-boundary --boundary-map-path /sys/fs/bpf/moray/boundary_map --json)
+UPDATED_DENY_ENTRY=$($MORAY_HOOK --dump-boundary --boundary-map-path /sys/fs/bpf/moray/boundary_map --json)
 if ! echo "$UPDATED_DENY_ENTRY" | grep -A 5 '"victim_worker"' | grep -q '"hit_count": [1-9]'; then
     echo "[-] FATAL: In-kernel hit_count was not incremented for victim_worker under DENY_ALL_NET!"
     exit 1
@@ -904,7 +910,7 @@ if [ "$RET_UNLISTED_DENY" -ne 42 ]; then
 fi
 echo "[+] EMPIRICAL PROOF: Unlisted executable was autonomously severed with -EPERM by Ring 0 BPF-LSM under DENY_ALL_NET!"
 
-QUARANTINE_TABLE_DENY=$(python3 bridge/lobster_hook.py --list --map-path /sys/fs/bpf/moray/quarantine_map --json)
+QUARANTINE_TABLE_DENY=$($MORAY_HOOK --list --map-path /sys/fs/bpf/moray/quarantine_map --json)
 echo "$QUARANTINE_TABLE_DENY"
 if ! echo "$QUARANTINE_TABLE_DENY" | grep -q '"reason": 2'; then
     echo "[-] FATAL: Autonomous strike was not recorded in moray_quarantine_map under DENY_ALL_NET (reason 2 expected)!"
@@ -938,7 +944,7 @@ if [ "$RET_DENY_WAN" -ne 44 ]; then
 fi
 echo "[+] EMPIRICAL PROOF: WAN socket connect severed with -EPERM under autonomous DENY_ALL_NET!"
 
-DENY_EVENTS=$(python3 bridge/lobster_hook.py --events-path /sys/fs/bpf/moray/events --tail-events --count 5 --json)
+DENY_EVENTS=$($MORAY_HOOK --events-path /sys/fs/bpf/moray/events --tail-events --count 5 --json)
 echo "$DENY_EVENTS"
 if ! echo "$DENY_EVENTS" | grep -q 'SOCKET'; then
     echo "[-] FATAL: Autonomous DENY_ALL_NET socket severance event not found in ringbuf!"

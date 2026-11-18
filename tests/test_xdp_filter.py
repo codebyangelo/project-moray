@@ -17,7 +17,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from bridge.lobster_hook import (
+from bridge.moray_hook import (
     MAX_MAP_FILE_BYTES,
     MorayHook,
     MorayQuarantineError,
@@ -176,7 +176,7 @@ class TestXDPCLIInterface:
 
     def test_cli_xdp_drop_check_remove_cycle(self, tmp_path: Path) -> None:
         xdp_file = str(tmp_path / "cli_xdp.map")
-        script = str(REPO_ROOT / "bridge" / "lobster_hook.py")
+        script = str(REPO_ROOT / "bridge" / "moray_hook.py")
         target_ip = "198.51.100.99"
 
         # 1. Assert drop via CLI

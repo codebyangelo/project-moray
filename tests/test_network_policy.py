@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from bridge.lobster_hook import (
+from bridge.moray_hook import (
     FAIL_CLOSED_EXIT_CODE,
     MORAY_ACT_ALLOW_LOOPBACK,
     MORAY_ACT_BLOCK_EXEC,
@@ -105,7 +105,7 @@ class TestNetworkPolicyCLI:
     @pytest.fixture
     def hook_cli(self, tmp_path: Path) -> tuple[str, str]:
         mock_file = str(tmp_path / "cli_net_quarantine.bin")
-        script = str(Path(__file__).resolve().parent.parent / "bridge" / "lobster_hook.py")
+        script = str(Path(__file__).resolve().parent.parent / "bridge" / "moray_hook.py")
         return script, mock_file
 
     def test_cli_block_wan(self, hook_cli: tuple[str, str]) -> None:

@@ -38,8 +38,9 @@ Under `DENY_ALL_NET`, the containment boundary imposes **total network severance
   - Seeds worker entries in `allowed_comms` with `allow_wan ? MORAY_PERM_ALL : MORAY_PERM_EXEC`.
   - Emits telemetry indicating active network posture (`REQUIRE_WAN`, `DENY_ALL_NET`, or `ALLOW_LOOPBACK`).
 
-### D. Python Bridge & In-Kernel Map Verification (`bridge/lobster_hook.py`, `bridge/moray_hook.py`)
-- Exported `MORAY_PERM_LOOPBACK = 0x04`.
+### D. Python Bridge & In-Kernel Map Verification (`bridge/moray_hook.py` Primary, `bridge/lobster_hook.py` Secondary)
+- Established `bridge/moray_hook.py` as the sovereign, primary Python controller and CLI for Project Moray, while maintaining `bridge/lobster_hook.py` as a secondary L7 adapter.
+- Exported `MORAY_PERM_LOOPBACK = 0x04` across all bridge interfaces.
 - Updated `list_boundary()` to expose `"can_loopback": bool(entry.perm_flags & MORAY_PERM_LOOPBACK)`.
 - Updated `verify_boundary_manifest()`:
   - For `DENY_ALL_NET`: asserts `sentinel["can_exec"]`, `not sentinel["can_loopback"]`, and `not sentinel["can_socket"]`.
@@ -61,7 +62,7 @@ The live KVM microVM test suite (`tests/run_live_kernel_test.sh`) is expanded to
 | :--- | :--- | :--- |
 | **Step 55** | Generate sovereign boundary manifest (`DENY_ALL_NET`). | Valid manifest emitted with `network_posture: "DENY_ALL_NET"`, `victim_worker` allowed, `unlisted_worker` excluded. |
 | **Step 56** | Launch `morayd --auto-harden` in live Ring 0 mode (`DENY_ALL_NET`). | Verified pinned `/sys/fs/bpf/moray/boundary_map` on clean bpffs; daemon logs confirmation of `DENY_ALL_NET`. |
-| **Step 57** | Hardware verification of live `boundary_map` contents against manifest. | `--verify-boundary` confirms sentinel `MORAY_PERM_EXEC` (`can_loopback == False`, `can_socket == False`) and worker permissions. Hard failure if missing. |
+| **Step 57** | Hardware verification of live `boundary_map` contents against manifest. | `--verify-boundary` via primary `moray_hook.py` confirms sentinel `MORAY_PERM_EXEC` (`can_loopback == False`, `can_socket == False`) and worker permissions. Hard failure if missing. |
 | **Step 58** | Test listed binary execution (`victim_worker --baseline-exec`). | Executes cleanly (exit 0); in-kernel Ring 0 `hit_count` incremented $\ge 1$. |
 | **Step 59** | Test unlisted binary execution (`unlisted_worker`). | Intercepted with `-EPERM` (exit 42); autonomously quarantined in `moray_quarantine_map` with reason 2 (`EXEC_VIOLATION`). |
 | **Step 60** | Test total local network severance (Loopback and AF_UNIX). | Loopback connect (`127.0.0.1:80`) severed with `-EPERM` (exit 48); AF_UNIX IPC connect severed with `-EPERM` (exit 49). |

@@ -88,9 +88,9 @@ In adherence to the **Provenance & Chronology Invariant ($I_6$)** and strict hum
 * **`src/moray.h`**: Shared binary headers, quarantine bitmasks, boundary struct layouts, and ring buffer event schemas.
 * **`src/moray_kern.bpf.c`**: Ring 0 eBPF C program implementing LSM strike mechanisms (`bprm_check_security`, `socket_connect`), autonomous boundary defense (`moray_boundary_map`), and anti-tamper camouflage (`lsm/bpf`).
 * **`src/morayd.c`**: Zero-dependency C daemon mounting `/sys/fs/bpf/moray/`, seeding boundary policies, and draining ring buffer telemetry.
-* **`bridge/lobster_hook.py`**: Zero-dependency Python ctypes bridge allowing Project Lobster to flag PIDs into pinned quarantine maps.
+* **`bridge/moray_hook.py`**: Native sovereign Python bridge, CLI controller, and NDJSON telemetry consumer (Primary Moray Hook).
+* **`bridge/lobster_hook.py`**: Backward-compatible L7 bridge adapter for Project Lobster proxy integration (Secondary Hook).
 * **`bridge/moray_profiler.py`**: Sovereign, zero-dependency workspace profiler and boundary policy synthesizer.
-* **`bridge/moray_hook.py`**: Native sovereign Python bridge and NDJSON telemetry consumer.
 * **`moray_boundary.json`**: Machine-readable boundary specification for autonomous zero-config hardening.
 * **`tests/`**: Comprehensive test suite comprising:
   - 141 hermetic unit tests verifying layout, policy engine, XDP filter, cgroups, network policy, and E2E pipeline.
@@ -131,10 +131,11 @@ sudo ./bin/morayd --auto-harden
 python3 bridge/moray_profiler.py . --output moray_boundary.json
 ```
 
-### Quarantine Trigger (via Lobster Hook)
+### Quarantine Trigger & Manual Strike (via Sovereign Moray Hook)
 ```bash
-python3 bridge/lobster_hook.py --pid 1234 --strike
+python3 bridge/moray_hook.py --pid 1234 --strike
 ```
+*(For Project Lobster L7 integration, `bridge/lobster_hook.py` is maintained as a secondary backward-compatible adapter).*
 
 ---
 

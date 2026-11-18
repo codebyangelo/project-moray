@@ -2067,9 +2067,13 @@ class MorayHook:
 MorayQuarantineHook = MorayHook
 
 
-def main() -> None:
+def main(prog_desc: str | None = None) -> None:
+    desc = (
+        prog_desc
+        or "Project Moray: Zero-Dependency Python Bridge & Policy Engine for Project Lobster"
+    )
     parser = argparse.ArgumentParser(
-        description="Project Moray: Zero-Dependency Python Bridge & Policy Engine for Project Lobster",
+        description=desc,
     )
     parser.add_argument("--pid", type=int, help="Target process ID (PID) to inspect or strike")
     parser.add_argument("--strike", action="store_true", help="Trigger Pharyngeal Strike on PID")
