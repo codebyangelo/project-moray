@@ -29,9 +29,11 @@ from bridge.lobster_hook import (
     DEFAULT_QUARANTINE_PIN,
     DEFAULT_XDP_PIN,
     FAIL_CLOSED_EXIT_CODE,
+    MAX_MAP_FILE_BYTES,
     MORAY_ACT_ALLOW_LOOPBACK,
     MORAY_ACT_BLOCK_EXEC,
     MORAY_ACT_BLOCK_SOCKET,
+    MORAY_ACT_DROP_NET,
     MORAY_ACT_FULL_STRIKE,
     MORAY_ACT_KILL,
     MORAY_ACT_NONE,
@@ -41,6 +43,7 @@ from bridge.lobster_hook import (
     MORAY_HOOK_XDP,
     MORAY_PERM_ALL,
     MORAY_PERM_EXEC,
+    MORAY_PERM_LOOPBACK,
     MORAY_PERM_NONE,
     MORAY_PERM_SOCKET,
     MORAY_REASON_EXEC_VIOLATION,
@@ -51,14 +54,23 @@ from bridge.lobster_hook import (
     MORAY_STATE_ACTIVE,
     MORAY_STATE_EXPIRED,
     MORAY_STATE_RELEASED,
+    MORAY_STRIKE_TIER1,
+    MORAY_STRIKE_TIER2,
+    MORAY_STRIKE_TIER3,
+    PID_MAX,
+    PID_MIN,
     MorayBoundaryEntry,
     MorayEvent,
     MorayHook,
     MorayQuarantineEntry,
     MorayQuarantineError,
     MorayTelemetryConsumer,
+    ip_to_wire_bytes,
     is_entry_expired,
     resolve_cgroup_id,
+    validate_ipv4,
+    validate_pid,
+    wire_bytes_to_ip,
 )
 from bridge.lobster_hook import (
     main as bridge_main,
@@ -79,9 +91,11 @@ __all__ = [
     "DEFAULT_QUARANTINE_PIN",
     "DEFAULT_XDP_PIN",
     "FAIL_CLOSED_EXIT_CODE",
+    "MAX_MAP_FILE_BYTES",
     "MORAY_ACT_ALLOW_LOOPBACK",
     "MORAY_ACT_BLOCK_EXEC",
     "MORAY_ACT_BLOCK_SOCKET",
+    "MORAY_ACT_DROP_NET",
     "MORAY_ACT_FULL_STRIKE",
     "MORAY_ACT_KILL",
     "MORAY_ACT_NONE",
@@ -91,6 +105,7 @@ __all__ = [
     "MORAY_HOOK_XDP",
     "MORAY_PERM_ALL",
     "MORAY_PERM_EXEC",
+    "MORAY_PERM_LOOPBACK",
     "MORAY_PERM_NONE",
     "MORAY_PERM_SOCKET",
     "MORAY_REASON_EXEC_VIOLATION",
@@ -101,6 +116,11 @@ __all__ = [
     "MORAY_STATE_ACTIVE",
     "MORAY_STATE_EXPIRED",
     "MORAY_STATE_RELEASED",
+    "MORAY_STRIKE_TIER1",
+    "MORAY_STRIKE_TIER2",
+    "MORAY_STRIKE_TIER3",
+    "PID_MAX",
+    "PID_MIN",
     "MorayBoundaryEntry",
     "MorayBoundaryProfiler",
     "MorayEvent",
@@ -108,9 +128,19 @@ __all__ = [
     "MorayQuarantineEntry",
     "MorayQuarantineError",
     "MorayTelemetryConsumer",
+    "ip_to_wire_bytes",
     "is_entry_expired",
+    "main",
     "resolve_cgroup_id",
+    "validate_ipv4",
+    "validate_pid",
+    "wire_bytes_to_ip",
 ]
 
+
+def main() -> None:
+    bridge_main(prog_desc="Project Moray: Native Sovereign Python Bridge & Kernel Hook Controller")
+
+
 if __name__ == "__main__":
-    bridge_main()
+    main()

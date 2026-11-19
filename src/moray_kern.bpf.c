@@ -230,45 +230,48 @@ int BPF_PROG(moray_socket_strike, struct socket *sock, struct sockaddr *address,
     char sentinel_key[MORAY_COMM_LEN] = "__moray_auto__";
     struct moray_boundary_entry *sentinel = bpf_map_lookup_elem(&moray_boundary_map, sentinel_key);
     if (sentinel && !(sentinel->perm_flags & MORAY_PERM_SOCKET) && address && addrlen > 0) {
-        /* Default network posture is ALLOW_LOOPBACK: check if target address is loopback */
-        sa_family_t family = 0;
-        if (bpf_probe_read_kernel(&family, sizeof(family), &address->sa_family) == 0) {
-            if (family == AF_UNIX) {
-                return 0; /* Loopback UNIX socket allowed */
-            }
-            if (family == AF_INET && addrlen >= sizeof(struct sockaddr_in)) {
-                struct sockaddr_in in = {};
-                if (bpf_probe_read_kernel(&in, sizeof(in), address) == 0) {
-                    __u32 host_ip = bpf_ntohl(in.sin_addr.s_addr);
-                    if ((host_ip & 0xFF000000) == 0x7F000000) {
-                        return 0; /* Loopback IPv4 allowed */
-                    }
-                }
-            }
-            if (family == AF_INET6 && addrlen >= sizeof(struct sockaddr_in6)) {
-                struct sockaddr_in6 in6 = {};
-                if (bpf_probe_read_kernel(&in6, sizeof(in6), address) == 0) {
-                    if (in6.sin6_addr.in6_u.u6_addr32[0] == 0 &&
-                        in6.sin6_addr.in6_u.u6_addr32[1] == 0 &&
-                        in6.sin6_addr.in6_u.u6_addr32[2] == 0 &&
-                        in6.sin6_addr.in6_u.u6_addr32[3] == bpf_htonl(1)) {
-                        return 0; /* Loopback IPv6 allowed */
-                    }
-                }
-            }
-        }
-
-        /* Non-loopback WAN connection attempt: check if binary has explicit socket permission */
         char comm[MORAY_COMM_LEN] = {};
         bpf_get_current_comm(comm, sizeof(comm));
         struct moray_boundary_entry *b_entry = bpf_map_lookup_elem(&moray_boundary_map, comm);
+
+        /* Control plane daemon (e.g. morayd) retains MORAY_PERM_ALL / MORAY_PERM_SOCKET */
         if (b_entry && (b_entry->perm_flags & MORAY_PERM_SOCKET)) {
             __sync_fetch_and_add(&b_entry->hit_count, 1);
-            return 0; /* Permitted WAN socket */
+            return 0; /* Permitted WAN/network socket for management daemon */
         }
 
-        /* WAN socket severed under autonomous boundary */
-        bpf_printk("MORAY AUTO-STRIKE: WAN socket connect severed for '%s' (PID %d)\n", comm, tgid);
+        /* Check if network posture permits loopback/IPC (ALLOW_LOOPBACK) */
+        if (sentinel->perm_flags & MORAY_PERM_LOOPBACK) {
+            sa_family_t family = 0;
+            if (bpf_probe_read_kernel(&family, sizeof(family), &address->sa_family) == 0) {
+                if (family == AF_UNIX) {
+                    return 0; /* Loopback UNIX socket allowed under ALLOW_LOOPBACK */
+                }
+                if (family == AF_INET && addrlen >= sizeof(struct sockaddr_in)) {
+                    struct sockaddr_in in = {};
+                    if (bpf_probe_read_kernel(&in, sizeof(in), address) == 0) {
+                        __u32 host_ip = bpf_ntohl(in.sin_addr.s_addr);
+                        if ((host_ip & 0xFF000000) == 0x7F000000) {
+                            return 0; /* Loopback IPv4 allowed under ALLOW_LOOPBACK */
+                        }
+                    }
+                }
+                if (family == AF_INET6 && addrlen >= sizeof(struct sockaddr_in6)) {
+                    struct sockaddr_in6 in6 = {};
+                    if (bpf_probe_read_kernel(&in6, sizeof(in6), address) == 0) {
+                        if (in6.sin6_addr.in6_u.u6_addr32[0] == 0 &&
+                            in6.sin6_addr.in6_u.u6_addr32[1] == 0 &&
+                            in6.sin6_addr.in6_u.u6_addr32[2] == 0 &&
+                            in6.sin6_addr.in6_u.u6_addr32[3] == bpf_htonl(1)) {
+                            return 0; /* Loopback IPv6 allowed under ALLOW_LOOPBACK */
+                        }
+                    }
+                }
+            }
+        }
+
+        /* Socket severed under autonomous boundary (DENY_ALL_NET or unauthorized WAN under ALLOW_LOOPBACK) */
+        bpf_printk("MORAY AUTO-STRIKE: Socket connect severed for '%s' (PID %d)\n", comm, tgid);
         emit_strike_event(pid, tgid, MORAY_ACT_BLOCK_SOCKET, -1, MORAY_HOOK_SOCKET, 1);
         return -1; /* -EPERM */
     }

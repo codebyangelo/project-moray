@@ -17,7 +17,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from bridge.lobster_hook import (
+from bridge.moray_hook import (
     MAX_MAP_FILE_BYTES,
     PID_MAX,
     MorayHook,

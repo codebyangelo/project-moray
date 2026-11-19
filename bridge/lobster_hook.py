@@ -59,6 +59,7 @@ MORAY_STRIKE_TIER3: int = 5  # 5 hits: Auto-escalate to SIGKILL
 MORAY_PERM_NONE: int = 0x00
 MORAY_PERM_EXEC: int = 0x01
 MORAY_PERM_SOCKET: int = 0x02
+MORAY_PERM_LOOPBACK: int = 0x04
 MORAY_PERM_ALL: int = 0xFF
 
 # Default Pinned Paths
@@ -1931,6 +1932,7 @@ class MorayHook:
                         "hit_count": entry.hit_count,
                         "can_exec": bool(entry.perm_flags & MORAY_PERM_EXEC),
                         "can_socket": bool(entry.perm_flags & MORAY_PERM_SOCKET),
+                        "can_loopback": bool(entry.perm_flags & MORAY_PERM_LOOPBACK),
                     }
                 curr = self._bpf_boundary_get_next_key(curr)
         else:
@@ -1941,6 +1943,7 @@ class MorayHook:
                     "hit_count": entry.hit_count,
                     "can_exec": bool(entry.perm_flags & MORAY_PERM_EXEC),
                     "can_socket": bool(entry.perm_flags & MORAY_PERM_SOCKET),
+                    "can_loopback": bool(entry.perm_flags & MORAY_PERM_LOOPBACK),
                 }
         return res
 
@@ -1980,9 +1983,26 @@ class MorayHook:
                 raise MorayQuarantineError(
                     f"Sentinel perm_flags (0x{sentinel['perm_flags']:02x}) missing MORAY_PERM_EXEC"
                 )
+            if not sentinel["can_loopback"]:
+                raise MorayQuarantineError(
+                    f"Sentinel perm_flags (0x{sentinel['perm_flags']:02x}) missing MORAY_PERM_LOOPBACK under ALLOW_LOOPBACK!"
+                )
             if sentinel["can_socket"]:
                 raise MorayQuarantineError(
                     f"Sentinel perm_flags (0x{sentinel['perm_flags']:02x}) improperly has MORAY_PERM_SOCKET under ALLOW_LOOPBACK!"
+                )
+        elif network_posture == "DENY_ALL_NET":
+            if not sentinel["can_exec"]:
+                raise MorayQuarantineError(
+                    f"Sentinel perm_flags (0x{sentinel['perm_flags']:02x}) missing MORAY_PERM_EXEC"
+                )
+            if sentinel["can_loopback"]:
+                raise MorayQuarantineError(
+                    f"Sentinel perm_flags (0x{sentinel['perm_flags']:02x}) improperly has MORAY_PERM_LOOPBACK under DENY_ALL_NET!"
+                )
+            if sentinel["can_socket"]:
+                raise MorayQuarantineError(
+                    f"Sentinel perm_flags (0x{sentinel['perm_flags']:02x}) improperly has MORAY_PERM_SOCKET under DENY_ALL_NET!"
                 )
         elif network_posture == "REQUIRE_WAN" and not sentinel["can_socket"]:
             raise MorayQuarantineError(
@@ -2002,11 +2022,11 @@ class MorayHook:
                     mismatched_comms.append(f"{comm_key}: missing MORAY_PERM_EXEC")
                 if (
                     comm_key != "morayd"
-                    and network_posture == "ALLOW_LOOPBACK"
+                    and network_posture in ("ALLOW_LOOPBACK", "DENY_ALL_NET")
                     and entry["can_socket"]
                 ):
                     mismatched_comms.append(
-                        f"{comm_key}: improperly granted MORAY_PERM_SOCKET under ALLOW_LOOPBACK"
+                        f"{comm_key}: improperly granted MORAY_PERM_SOCKET under {network_posture}"
                     )
                 elif (
                     comm_key != "morayd"
@@ -2047,9 +2067,13 @@ class MorayHook:
 MorayQuarantineHook = MorayHook
 
 
-def main() -> None:
+def main(prog_desc: str | None = None) -> None:
+    desc = (
+        prog_desc
+        or "Project Moray: Zero-Dependency Python Bridge & Policy Engine for Project Lobster"
+    )
     parser = argparse.ArgumentParser(
-        description="Project Moray: Zero-Dependency Python Bridge & Policy Engine for Project Lobster",
+        description=desc,
     )
     parser.add_argument("--pid", type=int, help="Target process ID (PID) to inspect or strike")
     parser.add_argument("--strike", action="store_true", help="Trigger Pharyngeal Strike on PID")

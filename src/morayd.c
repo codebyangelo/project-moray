@@ -393,7 +393,7 @@ static void seed_default_boundary(int map_fd) {
         "morayd", "victim_worker", "bash", "sh", "python", "python3", "make", "gcc", "clang", "tcc", "cat", "ls", "rm", "mkdir", "true"
     };
     char sentinel_key[MORAY_COMM_LEN] = "__moray_auto__";
-    struct moray_boundary_entry sentinel_val = { .perm_flags = MORAY_PERM_EXEC, .reserved = 0, .hit_count = 0 };
+    struct moray_boundary_entry sentinel_val = { .perm_flags = MORAY_PERM_EXEC | MORAY_PERM_LOOPBACK, .reserved = 0, .hit_count = 0 };
     bpf_map_update_elem(map_fd, sentinel_key, &sentinel_val, BPF_ANY);
 
     size_t count = sizeof(defaults) / sizeof(defaults[0]);
@@ -403,6 +403,11 @@ static void seed_default_boundary(int map_fd) {
         struct moray_boundary_entry val = { .perm_flags = MORAY_PERM_EXEC, .reserved = 0, .hit_count = 0 };
         bpf_map_update_elem(map_fd, key, &val, BPF_ANY);
     }
+
+    char self_comm[MORAY_COMM_LEN] = "morayd";
+    struct moray_boundary_entry self_val = { .perm_flags = MORAY_PERM_ALL, .reserved = 0, .hit_count = 0 };
+    bpf_map_update_elem(map_fd, self_comm, &self_val, BPF_ANY);
+
     fprintf(stdout, "[+] Auto-Harden: Seeded %zu default executables into boundary_map.\n", count);
     fprintf(stdout, "[+] Autonomous Ring 0 Boundary Defense ACTIVE (Network Posture: ALLOW_LOOPBACK)\n");
 }
@@ -442,11 +447,18 @@ static int seed_boundary_manifest(int map_fd, const char *manifest_path) {
     fclose(f);
 
     int allow_wan = (strstr(buf, "\"REQUIRE_WAN\"") != NULL);
+    int deny_all = (strstr(buf, "\"DENY_ALL_NET\"") != NULL);
 
     char sentinel_key[MORAY_COMM_LEN] = "__moray_auto__";
     struct moray_boundary_entry sentinel_val;
     memset(&sentinel_val, 0, sizeof(sentinel_val));
-    sentinel_val.perm_flags = allow_wan ? MORAY_PERM_ALL : MORAY_PERM_EXEC;
+    if (allow_wan) {
+        sentinel_val.perm_flags = MORAY_PERM_ALL;
+    } else if (deny_all) {
+        sentinel_val.perm_flags = MORAY_PERM_EXEC;
+    } else {
+        sentinel_val.perm_flags = MORAY_PERM_EXEC | MORAY_PERM_LOOPBACK;
+    }
     bpf_map_update_elem(map_fd, sentinel_key, &sentinel_val, BPF_ANY);
 
     int count = 0;
@@ -486,9 +498,9 @@ static int seed_boundary_manifest(int map_fd, const char *manifest_path) {
     bpf_map_update_elem(map_fd, self_comm, &self_val, BPF_ANY);
 
     free(buf);
+    const char *posture_str = allow_wan ? "REQUIRE_WAN" : (deny_all ? "DENY_ALL_NET" : "ALLOW_LOOPBACK");
     fprintf(stdout, "[+] Auto-Harden: Successfully seeded %d allowed executables from %s\n", count, manifest_path);
-    fprintf(stdout, "[+] Autonomous Ring 0 Boundary Defense ACTIVE (Network Posture: %s)\n",
-            allow_wan ? "REQUIRE_WAN" : "ALLOW_LOOPBACK");
+    fprintf(stdout, "[+] Autonomous Ring 0 Boundary Defense ACTIVE (Network Posture: %s)\n", posture_str);
     return count;
 }
 

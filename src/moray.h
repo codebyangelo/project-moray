@@ -56,6 +56,7 @@ typedef uint32_t __be32;
 #define MORAY_PERM_NONE         0x00U
 #define MORAY_PERM_EXEC         0x01U  /* Allowed process execution */
 #define MORAY_PERM_SOCKET       0x02U  /* Allowed outbound network socket */
+#define MORAY_PERM_LOOPBACK     0x04U  /* Allowed loopback/IPC network socket */
 #define MORAY_PERM_ALL          0xFFU  /* Full execution & network permission */
 
 /* Strike Reason Codes */

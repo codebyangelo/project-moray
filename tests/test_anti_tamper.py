@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from bridge.lobster_hook import (
+from bridge.moray_hook import (
     MORAY_ACT_BLOCK_EXEC,
     MORAY_ACT_BLOCK_SOCKET,
     MORAY_ACT_DROP_NET,
@@ -111,7 +111,7 @@ class TestAntiTamperCLI:
 
     def test_cli_report_tamper_and_status(self, tmp_path: Path) -> None:
         mock_file = str(tmp_path / "tamper_cli.bin")
-        script = str(REPO_ROOT / "bridge" / "lobster_hook.py")
+        script = str(REPO_ROOT / "bridge" / "moray_hook.py")
 
         # 1. Trigger anti-tamper assertion via CLI
         res = subprocess.run(

@@ -138,15 +138,16 @@ class TestAutonomousBoundaryE2E:
         from bridge.moray_hook import (
             MORAY_PERM_ALL,
             MORAY_PERM_EXEC,
+            MORAY_PERM_LOOPBACK,
             MorayBoundaryEntry,
             MorayQuarantineError,
         )
 
         hook = MorayHook(mock_mode=True)
 
-        # Seed mock boundary entries
+        # Seed mock boundary entries for ALLOW_LOOPBACK
         sentinel = MorayBoundaryEntry()
-        sentinel.perm_flags = MORAY_PERM_EXEC
+        sentinel.perm_flags = MORAY_PERM_EXEC | MORAY_PERM_LOOPBACK
         hook._mock_boundary_table["__moray_auto__"] = sentinel
 
         vw = MorayBoundaryEntry()
@@ -177,8 +178,56 @@ class TestAutonomousBoundaryE2E:
         assert "__moray_auto__" in boundary_list
         assert boundary_list["victim_worker"]["can_exec"] is True
         assert boundary_list["victim_worker"]["can_socket"] is False
+        assert boundary_list["victim_worker"]["can_loopback"] is False
         assert boundary_list["morayd"]["can_exec"] is True
         assert boundary_list["morayd"]["can_socket"] is True
+        assert boundary_list["__moray_auto__"]["can_exec"] is True
+        assert boundary_list["__moray_auto__"]["can_loopback"] is True
+        assert boundary_list["__moray_auto__"]["can_socket"] is False
+
+        # Verify DENY_ALL_NET posture
+        sentinel_deny = MorayBoundaryEntry()
+        sentinel_deny.perm_flags = MORAY_PERM_EXEC  # No loopback, no socket
+        hook._mock_boundary_table["__moray_auto__"] = sentinel_deny
+
+        manifest_deny_file = tmp_path / "test_manifest_deny.json"
+        manifest_deny_data = {
+            "version": "1.0.0",
+            "target_name": "test-agent-isolated",
+            "boundary_policy": {
+                "default_action": "AUTONOMOUS_STRIKE",
+                "allowed_comms": ["morayd", "victim_worker"],
+                "network_posture": "DENY_ALL_NET",
+            },
+        }
+        manifest_deny_file.write_text(json.dumps(manifest_deny_data))
+
+        res_deny = hook.verify_boundary_manifest(str(manifest_deny_file))
+        assert res_deny["status"] == "verified"
+        assert res_deny["network_posture"] == "DENY_ALL_NET"
+        assert hook.list_boundary()["__moray_auto__"]["can_loopback"] is False
+
+        # Negative check: sentinel improperly has MORAY_PERM_LOOPBACK under DENY_ALL_NET
+        sentinel_deny.perm_flags = MORAY_PERM_EXEC | MORAY_PERM_LOOPBACK
+        with pytest.raises(
+            MorayQuarantineError, match="improperly has MORAY_PERM_LOOPBACK under DENY_ALL_NET"
+        ):
+            hook.verify_boundary_manifest(str(manifest_deny_file))
+
+        # Reset sentinel for DENY_ALL_NET
+        sentinel_deny.perm_flags = MORAY_PERM_EXEC
+
+        # Negative check: worker comm improperly granted MORAY_PERM_SOCKET under DENY_ALL_NET
+        vw.perm_flags = MORAY_PERM_ALL
+        with pytest.raises(
+            MorayQuarantineError, match="improperly granted MORAY_PERM_SOCKET under DENY_ALL_NET"
+        ):
+            hook.verify_boundary_manifest(str(manifest_deny_file))
+
+        # Restore victim_worker and sentinel for ALLOW_LOOPBACK
+        vw.perm_flags = MORAY_PERM_EXEC
+        sentinel.perm_flags = MORAY_PERM_EXEC | MORAY_PERM_LOOPBACK
+        hook._mock_boundary_table["__moray_auto__"] = sentinel
 
         # Negative check 1: manifest with missing comm fails closed
         bad_manifest = tmp_path / "bad_manifest.json"
@@ -199,14 +248,24 @@ class TestAutonomousBoundaryE2E:
         vw_leaky = MorayBoundaryEntry()
         vw_leaky.perm_flags = MORAY_PERM_ALL
         hook._mock_boundary_table["victim_worker"] = vw_leaky
-        with pytest.raises(MorayQuarantineError, match="improperly granted MORAY_PERM_SOCKET"):
+        with pytest.raises(
+            MorayQuarantineError, match="improperly granted MORAY_PERM_SOCKET under ALLOW_LOOPBACK"
+        ):
             hook.verify_boundary_manifest(str(manifest_file))
 
         # Restore victim_worker to valid state
         vw.perm_flags = MORAY_PERM_EXEC
         hook._mock_boundary_table["victim_worker"] = vw
 
-        # Negative check 3: missing morayd daemon self-entry fails closed
+        # Negative check 3: sentinel missing MORAY_PERM_LOOPBACK under ALLOW_LOOPBACK fails closed
+        sentinel.perm_flags = MORAY_PERM_EXEC
+        with pytest.raises(
+            MorayQuarantineError, match="missing MORAY_PERM_LOOPBACK under ALLOW_LOOPBACK"
+        ):
+            hook.verify_boundary_manifest(str(manifest_file))
+        sentinel.perm_flags = MORAY_PERM_EXEC | MORAY_PERM_LOOPBACK
+
+        # Negative check 4: missing morayd daemon self-entry fails closed
         del hook._mock_boundary_table["morayd"]
         with pytest.raises(MorayQuarantineError, match="missing from kernel"):
             hook.verify_boundary_manifest(str(manifest_file))

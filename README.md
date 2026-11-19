@@ -73,6 +73,7 @@ In adherence to the **Provenance & Chronology Invariant ($I_6$)** and strict hum
 | | **Daemon Auto-Harden Startup** | **Verified (Hermetic)** | Ingests manifest, seeds `moray_boundary_map`, enforces strict opt-in discipline (`tests/test_autonomous_boundary_e2e.py`). |
 | | **Autonomous Boundary in MicroVM (`ALLOW_LOOPBACK`)** | **Verified (Ring 0)** | Real manifest loaded; pinned `boundary_map` verified; listed execution passed, unlisted binary intercepted with `-EPERM` & auto-quarantined; loopback allowed and WAN severed under `ALLOW_LOOPBACK` (`tests/run_live_kernel_test.sh` Steps 47–54). |
 | **Tier 2: Partially Tested / Mock-Emulated** | **Cross-Repo Octopus Audit** | **Conditional CI** | Verified when Project Octopus sibling workspace is present; safely skipped without error in standalone CI runners. |
+| | **Autonomous Boundary in MicroVM (`DENY_ALL_NET`)** | **Staged (Domain 8)** | Domain 8 (Steps 55–62) implemented and passing hermetic verification; staged in `tests/run_live_kernel_test.sh` awaiting GitHub Actions CI verification. |
 | **Tier 3: Claimed in Threat Model / Roadmap** | **VFS Path Unlink Protection** | **In Progress (Phase 8)**| Pinned maps protected by OS permissions (`0700` root) and `lsm/bpf`; dedicated VFS LSM hooks (`file_unlink`) scheduled for Phase 8. |
 | | **IPv6 Wire-Rate Drops** | **Roadmap** | `moray_xdp_drop_map` currently keys on `__u32` IPv4 addresses; IPv6 128-bit keying scheduled for future release. |
 | | **Deep Packet Inspection (DPI)** | **Deferred to L7** | Moray operates at L0/L3/L4; semantic payload analysis and regex inspection are delegated to Project Lobster. |
@@ -87,13 +88,13 @@ In adherence to the **Provenance & Chronology Invariant ($I_6$)** and strict hum
 * **`src/moray.h`**: Shared binary headers, quarantine bitmasks, boundary struct layouts, and ring buffer event schemas.
 * **`src/moray_kern.bpf.c`**: Ring 0 eBPF C program implementing LSM strike mechanisms (`bprm_check_security`, `socket_connect`), autonomous boundary defense (`moray_boundary_map`), and anti-tamper camouflage (`lsm/bpf`).
 * **`src/morayd.c`**: Zero-dependency C daemon mounting `/sys/fs/bpf/moray/`, seeding boundary policies, and draining ring buffer telemetry.
-* **`bridge/lobster_hook.py`**: Zero-dependency Python ctypes bridge allowing Project Lobster to flag PIDs into pinned quarantine maps.
+* **`bridge/moray_hook.py`**: Native sovereign Python bridge, CLI controller, and NDJSON telemetry consumer (Primary Moray Hook).
+* **`bridge/lobster_hook.py`**: Backward-compatible L7 bridge adapter for Project Lobster proxy integration (Secondary Hook).
 * **`bridge/moray_profiler.py`**: Sovereign, zero-dependency workspace profiler and boundary policy synthesizer.
-* **`bridge/moray_hook.py`**: Native sovereign Python bridge and NDJSON telemetry consumer.
 * **`moray_boundary.json`**: Machine-readable boundary specification for autonomous zero-config hardening.
 * **`tests/`**: Comprehensive test suite comprising:
   - 141 hermetic unit tests verifying layout, policy engine, XDP filter, cgroups, network policy, and E2E pipeline.
-  - 54 live Ring 0 kernel verification steps running inside a real KVM microVM (`run_live_kernel_test.sh`).
+  - 54 live Ring 0 kernel verification steps verified on main (Steps 55–62 staged in Domain 8 for `DENY_ALL_NET` expansion to 62 steps).
 
 ---
 
@@ -130,10 +131,11 @@ sudo ./bin/morayd --auto-harden
 python3 bridge/moray_profiler.py . --output moray_boundary.json
 ```
 
-### Quarantine Trigger (via Lobster Hook)
+### Quarantine Trigger & Manual Strike (via Sovereign Moray Hook)
 ```bash
-python3 bridge/lobster_hook.py --pid 1234 --strike
+python3 bridge/moray_hook.py --pid 1234 --strike
 ```
+*(For Project Lobster L7 integration, `bridge/lobster_hook.py` is maintained as a secondary backward-compatible adapter).*
 
 ---
 

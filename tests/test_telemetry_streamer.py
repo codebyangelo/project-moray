@@ -20,7 +20,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from bridge.lobster_hook import (
+from bridge.moray_hook import (
     FAIL_CLOSED_EXIT_CODE,
     MORAY_ACT_BLOCK_EXEC,
     MORAY_ACT_KILL,
@@ -253,7 +253,7 @@ class TestCLIStreamerIntegration:
             # 1. Emit mock event via CLI
             emit_cmd = [
                 sys.executable,
-                str(REPO_ROOT / "bridge" / "lobster_hook.py"),
+                str(REPO_ROOT / "bridge" / "moray_hook.py"),
                 "--emit-mock-event",
                 "--pid",
                 "7777",
@@ -272,7 +272,7 @@ class TestCLIStreamerIntegration:
             # 2. Tail events via CLI
             tail_cmd = [
                 sys.executable,
-                str(REPO_ROOT / "bridge" / "lobster_hook.py"),
+                str(REPO_ROOT / "bridge" / "moray_hook.py"),
                 "--tail-events",
                 "--count",
                 "1",
@@ -314,7 +314,7 @@ class TestCLIStreamerIntegration:
 
             tail_cmd = [
                 sys.executable,
-                str(REPO_ROOT / "bridge" / "lobster_hook.py"),
+                str(REPO_ROOT / "bridge" / "moray_hook.py"),
                 "--tail-events",
                 "--count",
                 "1",
@@ -338,7 +338,7 @@ class TestCLIStreamerIntegration:
 
             cmd = [
                 sys.executable,
-                str(REPO_ROOT / "bridge" / "lobster_hook.py"),
+                str(REPO_ROOT / "bridge" / "moray_hook.py"),
                 "--tail-events",
                 "--events-path",
                 symlink_file,
