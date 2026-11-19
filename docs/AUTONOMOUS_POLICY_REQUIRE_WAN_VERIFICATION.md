@@ -3,7 +3,7 @@
 > **Classification:** Systems Architecture & Kernel Verification Report  
 > **Subsystems:** Linux Ring 0 BPF-LSM, `morayd` Auto-Harden Daemon, `boundary_map`, `moray_hook.py`  
 > **Security Contracts:** Invariant $I_8$ (Granular Network Isolation) & Invariant $I_9$ (Autonomous Boundary Enforcement)  
-> **Status:** Staged for CI Verification (Domain 9, Steps 63–70 in MicroVM Harness, 141 Hermetic Tests Passed)
+> **Status:** Empirically Verified in GitHub Actions CI (Domain 9, Steps 63–70 in MicroVM Harness, 141 Hermetic Tests Passed)
 
 ---
 
@@ -74,6 +74,7 @@ The live KVM microVM test suite (`tests/run_live_kernel_test.sh`) is expanded to
 ## 4. Claims Truth Matrix & Ground Truth Invariant Protocol
 
 In strict adherence to the **Top-Down Ground Truth Invariant ($I_6$)**:
-- Claims for `REQUIRE_WAN` are currently staged in Tier 2 as `Staged (Domain 9)` until live execution inside `virtme-ng` on GitHub Actions completes cleanly.
-- The CI workflow (`.github/workflows/ci.yml`) enforces the `Zero Fail-Green Gate` against `ALL 70 LIVE RING 0 KERNEL TEST STEPS PASSED CLEANLY`.
-- Upon successful CI run on GitHub Actions, `Autonomous Boundary in MicroVM (REQUIRE_WAN)` will be elevated to **Tier 1 (Verified: Ring 0)** in `README.md` and `docs/INVARIANTS.md`, and the badge upgraded to **70/70 KVM Steps**, fully concluding the autonomous policy triad.
+- Claims for `REQUIRE_WAN` were staged in Tier 2 as `Staged (Domain 9)` until live execution inside `virtme-ng` on GitHub Actions completed cleanly.
+- The CI workflow (`.github/workflows/ci.yml`) enforced the `Zero Fail-Green Gate` against `ALL 70 LIVE RING 0 KERNEL TEST STEPS PASSED CLEANLY`.
+- MicroVM execution verified all 70 steps without error; PR #28 merged cleanly into `main` (`4d9226f`).
+- `Autonomous Boundary in MicroVM (REQUIRE_WAN)` is elevated to **Tier 1 (Verified: Ring 0)** in `README.md` and `docs/INVARIANTS.md`, and the badge upgraded to **70/70 KVM Steps**, fully concluding empirical verification of the autonomous policy triad.
