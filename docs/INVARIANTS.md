@@ -69,7 +69,7 @@ This document codifies the core architectural invariants of Project Moray (`mora
   - The control plane daemon (`morayd`) retains `MORAY_PERM_ALL` across all postures to preserve management operations and ringbuf event sinks.
 * **Opt-In Invariant**: When `--auto-harden` is omitted, the sentinel `"__moray_auto__"` MUST NOT be inserted. In this unseeded state, unquarantined processes pass unimpeded ($O(1)$ fast path under $I_2$), preserving the fail-safe boundary and preventing unintentional system-wide execution blocking.
 * **Enforcement Point**: `moray_bprm_strike` and `moray_socket_strike` in `src/moray_kern.bpf.c` and `seed_boundary_manifest()` in `src/morayd.c`.
-* **Verification**: `tests/test_autonomous_boundary_e2e.py`, `tests/test_struct_layout.c` (verifying 16-byte boundary struct layout and permission bitmasks), and live Ring 0 KVM microVM (`tests/run_live_kernel_test.sh` Steps 47–54 verified, Steps 55–62 staged in Domain 8).
+* **Verification**: `tests/test_autonomous_boundary_e2e.py`, `tests/test_struct_layout.c` (verifying 16-byte boundary struct layout and permission bitmasks), and live Ring 0 KVM microVM (`tests/run_live_kernel_test.sh` Steps 47–62 verified on main, Steps 63–70 staged in Domain 9).
 
 ---
 
@@ -87,4 +87,4 @@ This document codifies the core architectural invariants of Project Moray (`mora
 | **$I_6$** | Repository Git history | Differential CI check | Zero synthetic commit hashes or ungrounded claims. |
 | **$I_7$** | `lsm/bpf`, `lobster_hook.py` | `tests/test_anti_tamper.py`, `tests/run_live_kernel_test.sh` | Quarantined PID calling `sys_bpf` receives `-EPERM`; `--report-tamper` asserts strike. |
 | **$I_8$** | `lsm/socket_connect` | `tests/test_network_policy.py`, `tests/run_live_kernel_test.sh` | External WAN blocked with `-EPERM`; loopback/IPC allowed when flag asserted. |
-| **$I_9$** | `moray_boundary_map`, `morayd.c` | `tests/test_autonomous_boundary_e2e.py`, `tests/run_live_kernel_test.sh` (Steps 47–54 verified, Steps 55–62 staged) | Real manifest loaded; unlisted binary blocked with `-EPERM`; authorized binaries pass; loopback allowed and WAN blocked under `ALLOW_LOOPBACK`; all network severed under `DENY_ALL_NET`. |
+| **$I_9$** | `moray_boundary_map`, `morayd.c` | `tests/test_autonomous_boundary_e2e.py`, `tests/run_live_kernel_test.sh` (Steps 47–62 verified on main, Steps 63–70 staged) | Real manifest loaded; unlisted binary blocked with `-EPERM`; authorized binaries pass; loopback allowed and WAN blocked under `ALLOW_LOOPBACK`; all network severed under `DENY_ALL_NET`; WAN permitted under `REQUIRE_WAN`. |

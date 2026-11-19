@@ -80,15 +80,15 @@ jobs:
           echo "[-] FATAL: kvm_microvm_test.log was not generated!"
           exit 1
         fi
-        if ! grep -q "ALL 62 LIVE RING 0 KERNEL TEST STEPS PASSED CLEANLY" kvm_microvm_test.log; then
-          echo "[-] FATAL: MicroVM test failed or did not complete all 62 steps cleanly!"
+        if ! grep -q "ALL 70 LIVE RING 0 KERNEL TEST STEPS PASSED CLEANLY" kvm_microvm_test.log; then
+          echo "[-] FATAL: MicroVM test failed or did not complete all 70 steps cleanly!"
           exit 1
         fi
         if grep -q "FATAL" kvm_microvm_test.log; then
           echo "[-] FATAL error detected in microvm test execution log!"
           exit 1
         fi
-        echo "[+] Ground Truth Invariant Verified: All 62 steps completed without error."
+        echo "[+] Ground Truth Invariant Verified: All 70 steps completed without error."
 
     - name: Archive KVM Execution Logs & Diagnostics
       if: always()
@@ -101,4 +101,5 @@ jobs:
           /tmp/morayd_relaunch.log
           /tmp/morayd_auto.log
           /tmp/morayd_deny_all.log
+          /tmp/morayd_require_wan.log
         if-no-files-found: ignore

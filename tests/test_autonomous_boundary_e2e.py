@@ -224,6 +224,49 @@ class TestAutonomousBoundaryE2E:
         ):
             hook.verify_boundary_manifest(str(manifest_deny_file))
 
+        # Verify REQUIRE_WAN posture
+        sentinel_wan = MorayBoundaryEntry()
+        sentinel_wan.perm_flags = MORAY_PERM_ALL
+        hook._mock_boundary_table["__moray_auto__"] = sentinel_wan
+
+        vw_wan = MorayBoundaryEntry()
+        vw_wan.perm_flags = MORAY_PERM_ALL
+        hook._mock_boundary_table["victim_worker"] = vw_wan
+
+        manifest_wan_file = tmp_path / "test_manifest_wan.json"
+        manifest_wan_data = {
+            "version": "1.0.0",
+            "target_name": "test-agent-wan",
+            "boundary_policy": {
+                "default_action": "AUTONOMOUS_STRIKE",
+                "allowed_comms": ["morayd", "victim_worker"],
+                "network_posture": "REQUIRE_WAN",
+            },
+        }
+        manifest_wan_file.write_text(json.dumps(manifest_wan_data))
+
+        res_wan = hook.verify_boundary_manifest(str(manifest_wan_file))
+        assert res_wan["status"] == "verified"
+        assert res_wan["network_posture"] == "REQUIRE_WAN"
+        assert hook.list_boundary()["__moray_auto__"]["can_socket"] is True
+        assert hook.list_boundary()["victim_worker"]["can_socket"] is True
+
+        # Negative check: sentinel missing MORAY_PERM_SOCKET under REQUIRE_WAN
+        sentinel_wan.perm_flags = MORAY_PERM_EXEC
+        with pytest.raises(
+            MorayQuarantineError, match="missing MORAY_PERM_SOCKET under REQUIRE_WAN"
+        ):
+            hook.verify_boundary_manifest(str(manifest_wan_file))
+        sentinel_wan.perm_flags = MORAY_PERM_ALL
+
+        # Negative check: worker comm missing MORAY_PERM_SOCKET under REQUIRE_WAN
+        vw_wan.perm_flags = MORAY_PERM_EXEC
+        with pytest.raises(
+            MorayQuarantineError, match="missing MORAY_PERM_SOCKET under REQUIRE_WAN"
+        ):
+            hook.verify_boundary_manifest(str(manifest_wan_file))
+        vw_wan.perm_flags = MORAY_PERM_ALL
+
         # Restore victim_worker and sentinel for ALLOW_LOOPBACK
         vw.perm_flags = MORAY_PERM_EXEC
         sentinel.perm_flags = MORAY_PERM_EXEC | MORAY_PERM_LOOPBACK

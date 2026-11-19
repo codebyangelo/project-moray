@@ -161,8 +161,11 @@ int main(int argc, char **argv) {
         close(fd);
 
         fprintf(stdout, "[VICTIM] connect to %s:%d ret=%d, errno=%d (%s)\n", ip, port, ret, err, strerror(err));
+        if (ret == 0 || (ret < 0 && err != EPERM && err != EACCES)) {
+            return 43; /* Success: WAN connect permitted past LSM */
+        }
         if (ret < 0 && (err == EPERM || err == EACCES)) {
-            return 44; /* Success: Kernel blocked WAN connect */
+            return 44; /* Blocked: Kernel severed WAN connect with -EPERM */
         }
         return 1;
     } else if (strcmp(argv[1], "--wait-and-connect-loopback") == 0 || strcmp(argv[1], "--connect-loopback") == 0) {
