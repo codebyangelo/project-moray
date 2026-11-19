@@ -3,7 +3,7 @@
 > **Classification:** Systems Architecture & Kernel Verification Report  
 > **Subsystems:** Linux Ring 0 BPF-LSM, `morayd` Auto-Harden Daemon, `boundary_map`, `lobster_hook.py`  
 > **Security Contracts:** Invariant $I_8$ (Granular Network Isolation) & Invariant $I_9$ (Autonomous Boundary Enforcement)  
-> **Status:** Staged for CI Verification (Domain 8, Steps 55–62 in MicroVM Harness, 141 Hermetic Tests Passed)
+> **Status:** Empirically Verified in GitHub Actions CI (62/62 KVM Steps in MicroVM Harness, 141 Hermetic Tests Passed)
 
 ---
 
@@ -71,9 +71,9 @@ The live KVM microVM test suite (`tests/run_live_kernel_test.sh`) is expanded to
 
 ---
 
-## 4. Claims Truth Matrix & Ground Truth Invariant Protocol
+## 4. Claims Truth Matrix Elevation & Ground Truth Invariant Verification
 
 In strict adherence to the **Top-Down Ground Truth Invariant ($I_6$)**:
-- Claims for `DENY_ALL_NET` are currently staged in Tier 2 as `Staged (Domain 8)` until live execution inside `virtme-ng` on GitHub Actions completes cleanly.
-- The CI workflow (`.github/workflows/ci.yml`) enforces the `Zero Fail-Green Gate` against `ALL 62 LIVE RING 0 KERNEL TEST STEPS PASSED CLEANLY`.
-- Upon successful CI run on GitHub Actions, `Autonomous Boundary in MicroVM (DENY_ALL_NET)` will be elevated to **Tier 1 (Verified: Ring 0)** in `README.md` and `docs/INVARIANTS.md`, and the badge upgraded to **62/62 KVM Steps**.
+- The entire 62-step live Ring 0 microVM test harness (`tests/run_live_kernel_test.sh`) was executed inside `virtme-ng` on the GitHub Actions runner.
+- The dedicated CI Ground Truth Gate (`Enforce Ground Truth Invariant (Zero Fail-Green Gate)`) verified that `kvm_microvm_test.log` completed with `[+] Ground Truth Invariant Verified: All 62 steps completed without error.` and zero `FATAL` errors.
+- With empirical proof established across all 62 steps, `Autonomous Boundary in MicroVM (DENY_ALL_NET)` is elevated to **Tier 1 (Verified: Ring 0)** in `README.md` and `docs/INVARIANTS.md`, and the microVM verification badge updated to **62/62 KVM Steps**.
