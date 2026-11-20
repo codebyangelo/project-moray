@@ -110,7 +110,7 @@ ____##name(unsigned long long *ctx, ##args)
 #define BPF_FUNC_send_signal         109
 #define BPF_FUNC_probe_read_kernel   113
 #define BPF_FUNC_ringbuf_output      130
-#define BPF_FUNC_get_current_ancestor_cgroup_id 138
+#define BPF_FUNC_get_current_ancestor_cgroup_id 123
 
 /* Helper Function Signatures */
 static void *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *)BPF_FUNC_map_lookup_elem;
