@@ -76,6 +76,7 @@ In adherence to the **Provenance & Chronology Invariant ($I_6$)** and strict hum
 | | **Autonomous Boundary in MicroVM (`DENY_ALL_NET`)** | **Verified (Ring 0)** | Real manifest loaded; pinned `boundary_map` verified; listed execution passed, unlisted binary intercepted with `-EPERM` & auto-quarantined; loopback, UNIX IPC, and WAN severed with `-EPERM` under `DENY_ALL_NET` (`tests/run_live_kernel_test.sh` Steps 55–62). |
 | | **Autonomous Boundary in MicroVM (`REQUIRE_WAN`)** | **Verified (Ring 0)** | Real manifest loaded; pinned `boundary_map` verified; listed execution passed, unlisted binary intercepted with `-EPERM` & auto-quarantined; outbound WAN, loopback, and UNIX IPC permitted under `REQUIRE_WAN` (`tests/run_live_kernel_test.sh` Steps 63–70). |
 | | **Workload-Scoped Autonomous Boundary & Non-Interference** | **Verified (Ring 0 & Hermetic)** | Cgroup v2 workload jurisdiction (`bpf_get_current_cgroup_id()`, `bpf_get_current_ancestor_cgroup_id()`), non-interference fast-path for ungoverned workloads, child process inheritance, dynamic register/release, and dual-workload non-interference (`tests/run_live_kernel_test.sh` Steps 71–80, `tests/test_workload_boundary.py`). |
+| | **Multi-Stage Network Boundary Defense (`socket_create` & `socket_bind`)** | **Verified (Ring 0)** | 4-stage network defense: `lsm/socket_create` severs socket allocation & unconnected UDP (`sendto`) under `DENY_ALL_NET`, blocks `SOCK_RAW`/`AF_PACKET` under `ALLOW_LOOPBACK`; `lsm/socket_bind` severs wildcard (`0.0.0.0`) listener binding under `ALLOW_LOOPBACK` (`tests/run_live_kernel_test.sh` Steps 81–90). |
 | **Tier 2: Partially Tested / Mock-Emulated** | **Cross-Repo Octopus Audit** | **Conditional CI** | Verified when Project Octopus sibling workspace is present; safely skipped without error in standalone CI runners. |
 | **Tier 3: Claimed in Threat Model / Roadmap** | **VFS Path Unlink Protection** | **In Progress (Phase 8)**| Pinned maps protected by OS permissions (`0700` root) and `lsm/bpf`; dedicated VFS LSM hooks (`file_unlink`) scheduled for Phase 8. |
 | | **IPv6 Wire-Rate Drops** | **Roadmap** | `moray_xdp_drop_map` currently keys on `__u32` IPv4 addresses; IPv6 128-bit keying scheduled for future release. |
@@ -89,15 +90,15 @@ In adherence to the **Provenance & Chronology Invariant ($I_6$)** and strict hum
 ## 📂 Subsystems
 
 * **`src/moray.h`**: Shared binary headers, quarantine bitmasks, boundary struct layouts, and ring buffer event schemas.
-* **`src/moray_kern.bpf.c`**: Ring 0 eBPF C program implementing LSM strike mechanisms (`bprm_check_security`, `socket_connect`), autonomous boundary defense (`moray_boundary_map`), and anti-tamper camouflage (`lsm/bpf`).
+* **`src/moray_kern.bpf.c`**: Ring 0 eBPF C program implementing LSM strike mechanisms (`bprm_check_security`, `socket_connect`, `socket_bind`, `socket_create`), autonomous boundary defense (`moray_boundary_map`, `moray_workload_map`), and anti-tamper camouflage (`lsm/bpf`).
 * **`src/morayd.c`**: Zero-dependency C daemon mounting `/sys/fs/bpf/moray/`, seeding boundary policies, and draining ring buffer telemetry.
 * **`bridge/moray_hook.py`**: Native sovereign Python bridge, CLI controller, and NDJSON telemetry consumer (Primary Moray Hook).
 * **`bridge/lobster_hook.py`**: Backward-compatible L7 bridge adapter for Project Lobster proxy integration (Secondary Hook).
 * **`bridge/moray_profiler.py`**: Sovereign, zero-dependency workspace profiler and boundary policy synthesizer.
 * **`moray_boundary.json`**: Machine-readable boundary specification for autonomous zero-config hardening.
 * **`tests/`**: Comprehensive test suite comprising:
-  - 141 hermetic unit tests verifying layout, policy engine, XDP filter, cgroups, network policy, and E2E pipeline.
-  - 70 live Ring 0 kernel verification steps running inside a real KVM microVM across 9 security domains (`tests/run_live_kernel_test.sh`).
+  - 151 hermetic unit tests verifying layout, policy engine, XDP filter, cgroups, network policy, and E2E pipeline.
+  - 90 live Ring 0 kernel verification steps running inside a real KVM microVM across 12 security domains (`tests/run_live_kernel_test.sh`).
 
 ---
 

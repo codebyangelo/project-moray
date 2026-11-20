@@ -143,6 +143,20 @@ static long (*bpf_ringbuf_output)(void *ringbuf, void *data, __u64 size, __u64 f
 #ifndef AF_INET6
 #define AF_INET6 10
 #endif
+#ifndef AF_PACKET
+#define AF_PACKET 17
+#endif
+
+/* Socket Types */
+#ifndef SOCK_STREAM
+#define SOCK_STREAM 1
+#endif
+#ifndef SOCK_DGRAM
+#define SOCK_DGRAM 2
+#endif
+#ifndef SOCK_RAW
+#define SOCK_RAW 3
+#endif
 
 typedef unsigned short sa_family_t;
 

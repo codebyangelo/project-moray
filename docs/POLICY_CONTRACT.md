@@ -1,9 +1,9 @@
 # Project Moray: Formal Policy Contract & Enforcement Boundary Specification
 
 > **Classification:** Canonical Security Contract & Operational Ground Truth  
-> **Subsystems:** Linux Ring 0 BPF-LSM, `morayd` Auto-Harden Daemon, `moray_boundary_map`, `moray_hook.py`  
-> **Applicable Invariants:** Invariant $I_1$ (Fail-Closed Quarantine), Invariant $I_2$ (Zero-Latency Benign Baseline), Invariant $I_8$ (Granular Network Isolation), Invariant $I_9$ (Autonomous Boundary Enforcement)  
-> **Verification Status:** Empirically verified across 70/70 live KVM microVM steps (`tests/run_live_kernel_test.sh`) and 141 hermetic unit tests.
+> **Subsystems:** Linux Ring 0 BPF-LSM, `morayd` Auto-Harden Daemon, `moray_boundary_map`, `moray_workload_map`, `moray_hook.py`  
+> **Applicable Invariants:** Invariant $I_1$ (Fail-Closed Quarantine), Invariant $I_2$ (Zero-Latency Benign Baseline), Invariant $I_8$ (Multi-Layer Network Boundary Defense), Invariant $I_9$ (Autonomous Boundary Enforcement)  
+> **Verification Status:** Empirically verified across 90/90 live KVM microVM steps (`tests/run_live_kernel_test.sh`) and 151 hermetic unit tests.
 
 ---
 
@@ -14,25 +14,18 @@ This document codifies the precise operational semantics, jurisdiction, and enfo
 * `DENY_ALL_NET`
 * `REQUIRE_WAN`
 
-The objective is to eliminate semantic drift, prevent nomenclature inflation, and strictly delineate what the in-kernel Ring 0 LSM checks guarantee versus what remains out of scope.
+The objective is to eliminate semantic drift, enforce Zero Nomenclature Inflation, and strictly delineate what the in-kernel Ring 0 LSM checks guarantee versus what remains out of scope.
 
 ---
 
 ## 2. Jurisdiction & Identity Model
 
-### 2.1 Current Identity Mechanism: Short Process Name (`comm`)
-In the current implementation ([`src/moray_kern.bpf.c`](file:///root/home/projects/project-moray/src/moray_kern.bpf.c#L141-L165)):
-* The autonomous boundary is activated globally when `--auto-harden` seeds the sentinel key `"__moray_auto__"` into `moray_boundary_map`.
-* Boundary lookups evaluate the calling task's executable name (`char comm[16]`) retrieved via `bpf_get_current_comm()`.
-* **Current Operational Boundary:** The policy applies host-wide to any process executing an unlisted binary or attempting a socket connection. It does not distinguish an agent's `python3` process from an unrelated system or administrative `python3` process elsewhere on the host.
-
-### 2.2 Target Jurisdiction Model: Workload-Scoped Cgroup v2 (Milestone 2)
-To establish proper legal jurisdiction—defining *whose* rules Moray enforces:
-* Moray is transitioning to **Workload-Scoped Jurisdiction** keyed on Linux Cgroup v2 identifiers (`bpf_get_current_cgroup_id()`).
-* Under this contract:
-  1. **Governed Workload:** Tasks residing inside the designated Cgroup v2 hierarchy are subject to the active autonomous boundary policy (executable whitelisting and network posture).
-  2. **Ungoverned Host Workloads:** Tasks executing outside the governed hierarchy bypass autonomous boundary checks entirely, passing through the $O(1)$ fast path unimpeded (Invariant $I_2$).
-  3. **Inheritance:** All child processes forked within a governed cgroup inherit the workload boundary.
+### 2.1 Identity & Jurisdiction: Workload-Scoped Cgroup v2
+Project Moray enforces **Workload-Scoped Jurisdiction** keyed on Linux Cgroup v2 identifiers (`bpf_get_current_cgroup_id()`, `bpf_get_current_ancestor_cgroup_id()`):
+1. **Governed Workload:** Tasks residing inside the designated Cgroup v2 hierarchy are subject to active autonomous boundary policy (executable whitelisting and 4-stage network boundary defense).
+2. **Ungoverned Host Workloads:** Tasks executing outside the governed hierarchy bypass autonomous boundary checks entirely, passing through the $O(1)$ fast path unimpeded (Invariant $I_2$).
+3. **Hierarchy Inheritance:** All child processes forked within a governed cgroup inherit the workload boundary across up to 4 ancestor levels (`MORAY_WORKLOAD_INHERIT_CHILDREN`).
+4. **Host-Wide Fallback:** When no workload cgroup is specified, Moray supports global host-wide sentinel gating (`MORAY_BOUNDARY_FLAG_HOSTWIDE`).
 
 ---
 
@@ -112,18 +105,45 @@ Across all three postures, the management daemon (`morayd`) is registered with `
 
 ---
 
-## 4. Enforcement Boundary vs. Universal Network Isolation
+## 4. Multi-Layer Ring 0 Network Boundary Architecture
 
-To preserve technical precision, Moray explicitly distinguishes between its active enforcement points and general networking layers:
+To eliminate nomenclature inflation and guarantee technical truth, Moray models network defense as a **4-Stage Ring 0 Gate**:
+
+```
+[Userspace Syscall]
+        │
+        ▼
+[Stage 1: Socket Allocation Gate (lsm/socket_create)]
+        │  ├── DENY_ALL_NET: Block AF_INET/AF_INET6/AF_UNIX/AF_PACKET allocation (-EPERM)
+        │  └── ALLOW_LOOPBACK: Block SOCK_RAW / AF_PACKET frame crafting (-EPERM)
+        ▼
+[Stage 2: Address Binding Gate (lsm/socket_bind)]
+        │  ├── DENY_ALL_NET: Block all bind attempts (-EPERM)
+        │  └── ALLOW_LOOPBACK: Permit 127.0.0.0/8, ::1, AF_UNIX; Block 0.0.0.0 / WAN bind (-EPERM)
+        ▼
+[Stage 3: Outbound Initiation Gate (lsm/socket_connect)]
+        │  ├── DENY_ALL_NET: Block all connect attempts (-EPERM)
+        │  └── ALLOW_LOOPBACK: Permit 127.0.0.0/8, ::1, AF_UNIX; Block external WAN/LAN (-EPERM)
+        ▼
+[Transport / TCP/IP Stack]
+        │
+        ▼
+[Stage 4: Wire Ingress Gate (Driver XDP moray_xdp_filter)]
+           └── Line-rate ingress frame dropping via XDP_DROP for flagged IPs
+```
+
+### 4.1 Enforcement Matrix Across Subsystems
 
 | Network Operation | Hook Point / Subsystem | Moray Status | Boundary Guarantee |
 | :--- | :--- | :--- | :--- |
-| **Outbound TCP/UDP Initiation** | `lsm/socket_connect` | **Enforced (Ring 0)** | Evaluated against active policy posture; blocked with `-EPERM` under `DENY_ALL_NET` or non-loopback under `ALLOW_LOOPBACK`. |
-| **Local UNIX Domain Sockets** | `lsm/socket_connect` | **Enforced (Ring 0)** | Intercepted via `sa_family == AF_UNIX`; blocked under `DENY_ALL_NET`, permitted under `ALLOW_LOOPBACK` and `REQUIRE_WAN`. |
-| **Specific Malicious IPv4 Wire Frames**| Driver `XDP` (`moray_xdp_drop_map`) | **Enforced (Ring 0)** | Dropped at line-rate via `XDP_DROP` before reaching kernel network stack. |
-| **Pre-existing Open Sockets** | Transport State | **Not Retrospective** | `socket_connect` executes at initiation time. Connections established before policy activation remain open unless explicitly killed via PID termination. |
-| **Inbound Sockets (`accept`)** | Transport / Firewall | **Out of Scope** | Inbound connection gating is governed by standard firewall rules (`nftables`/`iptables`) or user-space proxies (Project Lobster). |
-| **Arbitrary L2 / Raw Socket Transmission** | Packet Sockets | **Partially Enforced** | Unlisted binaries cannot execute `raw` socket utilities; however, raw frame isolation without `connect()` relies on XDP driver drops, not `socket_connect`. |
+| **Socket Allocation (`socket`)** | `lsm/socket_create` | **Enforced (Ring 0)** | Blocks socket creation under `DENY_ALL_NET`; blocks `SOCK_RAW` / `AF_PACKET` under `ALLOW_LOOPBACK`. |
+| **Unconnected Datagrams (UDP `sendto`)** | `lsm/socket_create` | **Enforced (Ring 0)** | Eliminates the unconnected UDP bypass: tasks under `DENY_ALL_NET` cannot allocate UDP sockets. |
+| **Listener Binding (`bind`)** | `lsm/socket_bind` | **Enforced (Ring 0)** | Blocks rogue listeners: under `ALLOW_LOOPBACK`, binding to `0.0.0.0` or WAN IPs receives `-EPERM`; only `127.0.0.1`/`::1`/`AF_UNIX` permitted. Under `DENY_ALL_NET`, all binds severed. |
+| **Outbound Connection Initiation** | `lsm/socket_connect` | **Enforced (Ring 0)** | Evaluated against active policy posture; severed with `-EPERM` for WAN under `ALLOW_LOOPBACK` and all connects under `DENY_ALL_NET`. |
+| **Local UNIX Domain Sockets** | `lsm/socket_connect` & `bind` | **Enforced (Ring 0)** | Intercepted via `sa_family == AF_UNIX`; blocked under `DENY_ALL_NET`, permitted under `ALLOW_LOOPBACK` and `REQUIRE_WAN`. |
+| **Malicious Ingress Wire Frames**| Driver `XDP` (`moray_xdp_drop_map`) | **Enforced (Ring 0)** | Dropped at line-rate via `XDP_DROP` before reaching kernel network stack. |
+| **Pre-existing Open Sockets** | Transport State | **Terminated via SIGKILL** | Sockets opened prior to quarantine entry remain open until dynamic escalation or full strike triggers `bpf_send_signal(9)` (Tier 3 termination). |
+| **Inbound Sockets (`accept`)** | Transport / Firewall | **Out of Scope** | Inbound connection admission is mediated by external firewall rules or user-space proxies (Project Lobster). |
 
 ---
 
@@ -140,7 +160,11 @@ Every claim in the Project Moray truth matrix maps directly to an automated veri
 | **External WAN Connect Blocked** | `ALLOW_LOOPBACK` | **Verified (Ring 0)** | `tests/run_live_kernel_test.sh` (Step 54) |
 | **Total Network Connect Severance**| `DENY_ALL_NET` | **Verified (Ring 0)** | `tests/run_live_kernel_test.sh` (Steps 60, 61, 62) |
 | **Non-Interception of Outbound Connect**| `REQUIRE_WAN` | **Verified (Ring 0)** | `tests/run_live_kernel_test.sh` (Steps 68, 69, 70) |
-| **Struct Memory Layout & Alignment**| Shared ABI | **Verified (Hermetic)** | `tests/test_struct_layout.c` (Lines 1–150) |
+| **Cgroup v2 Workload Jurisdiction**| Workload Map | **Verified (Ring 0)** | `tests/run_live_kernel_test.sh` (Steps 71–80) |
+| **Socket Allocation Gating** | `lsm/socket_create` | **Verified (Ring 0)** | `tests/run_live_kernel_test.sh` (Steps 83, 84) |
+| **Raw/Packet Socket Gating** | `lsm/socket_create` | **Verified (Ring 0)** | `tests/run_live_kernel_test.sh` (Step 87) |
+| **Listener Binding Gating** | `lsm/socket_bind` | **Verified (Ring 0)** | `tests/run_live_kernel_test.sh` (Steps 88, 89) |
+| **Dual-Workload Listener Non-Interference**| Workload Map | **Verified (Ring 0)** | `tests/run_live_kernel_test.sh` (Step 90) |
+| **Struct Memory Layout & Alignment**| Shared ABI | **Verified (Hermetic)** | `tests/test_struct_layout.c` (Lines 1–70) |
 | **Manifest Parsing & Auto-Harden** | Bridge & Daemon | **Verified (Hermetic)** | `tests/test_autonomous_boundary_e2e.py` |
 | **Cgroup v2 Quarantine Containment**| Manual / Lobster | **Verified (Ring 0)** | `tests/run_live_kernel_test.sh` (Steps 16–19) |
-| **Cgroup-Scoped Autonomous Boundary**| Planned Jurisdiction | **In Progress (Milestone 2)**| Scheduled for Phase 8 / Milestone 2 sprint |

@@ -226,6 +226,52 @@ int BPF_PROG(moray_bprm_strike, struct linux_binprm *bprm)
 }
 
 /*
+ * Helper: Verify destination/bind address is loopback (127.0.0.0/8, ::1) or AF_UNIX
+ */
+static inline int is_loopback_or_unix(struct sockaddr *address, int addrlen)
+{
+    if (!address || addrlen <= 0) {
+        return 0;
+    }
+
+    sa_family_t family = 0;
+    if (bpf_probe_read_kernel(&family, sizeof(family), &address->sa_family) != 0) {
+        return 0;
+    }
+
+    /* Allow local Unix Domain Sockets */
+    if (family == AF_UNIX) {
+        return 1;
+    }
+
+    /* Check IPv4 loopback (127.0.0.0/8) */
+    if (family == AF_INET && addrlen >= (int)sizeof(struct sockaddr_in)) {
+        struct sockaddr_in in = {};
+        if (bpf_probe_read_kernel(&in, sizeof(in), address) == 0) {
+            __u32 host_ip = bpf_ntohl(in.sin_addr.s_addr);
+            if ((host_ip & 0xFF000000) == 0x7F000000) {
+                return 1; /* Loopback IPv4 allowed */
+            }
+        }
+    }
+
+    /* Check IPv6 loopback (::1) */
+    if (family == AF_INET6 && addrlen >= (int)sizeof(struct sockaddr_in6)) {
+        struct sockaddr_in6 in6 = {};
+        if (bpf_probe_read_kernel(&in6, sizeof(in6), address) == 0) {
+            if (in6.sin6_addr.in6_u.u6_addr32[0] == 0 &&
+                in6.sin6_addr.in6_u.u6_addr32[1] == 0 &&
+                in6.sin6_addr.in6_u.u6_addr32[2] == 0 &&
+                in6.sin6_addr.in6_u.u6_addr32[3] == bpf_htonl(1)) {
+                return 1; /* Loopback IPv6 allowed */
+            }
+        }
+    }
+
+    return 0;
+}
+
+/*
  * Pharyngeal Strike 2: Sever Outbound Network Socket Initiation
  * Invariant I_1 / I_4: Quarantined PID cannot establish unauthorized network connections.
  * Invariant I_4: Granular Network Egress Filtering allows loopback/IPC if MORAY_ACT_ALLOW_LOOPBACK is set.
@@ -241,36 +287,8 @@ int BPF_PROG(moray_socket_strike, struct socket *sock, struct sockaddr *address,
 
     if (entry && (entry->action_flags & MORAY_ACT_BLOCK_SOCKET)) {
         /* If granular loopback policy is set, permit local IPC and localhost loopback */
-        if ((entry->action_flags & MORAY_ACT_ALLOW_LOOPBACK) && address && addrlen > 0) {
-            sa_family_t family = 0;
-            if (bpf_probe_read_kernel(&family, sizeof(family), &address->sa_family) == 0) {
-                /* Allow local Unix Domain Sockets */
-                if (family == AF_UNIX) {
-                    return 0;
-                }
-                /* Check IPv4 loopback (127.0.0.0/8) */
-                if (family == AF_INET && addrlen >= sizeof(struct sockaddr_in)) {
-                    struct sockaddr_in in = {};
-                    if (bpf_probe_read_kernel(&in, sizeof(in), address) == 0) {
-                        __u32 host_ip = bpf_ntohl(in.sin_addr.s_addr);
-                        if ((host_ip & 0xFF000000) == 0x7F000000) {
-                            return 0; /* Loopback IPv4 allowed */
-                        }
-                    }
-                }
-                /* Check IPv6 loopback (::1) */
-                if (family == AF_INET6 && addrlen >= sizeof(struct sockaddr_in6)) {
-                    struct sockaddr_in6 in6 = {};
-                    if (bpf_probe_read_kernel(&in6, sizeof(in6), address) == 0) {
-                        if (in6.sin6_addr.in6_u.u6_addr32[0] == 0 &&
-                            in6.sin6_addr.in6_u.u6_addr32[1] == 0 &&
-                            in6.sin6_addr.in6_u.u6_addr32[2] == 0 &&
-                            in6.sin6_addr.in6_u.u6_addr32[3] == bpf_htonl(1)) {
-                            return 0; /* Loopback IPv6 allowed */
-                        }
-                    }
-                }
-            }
+        if ((entry->action_flags & MORAY_ACT_ALLOW_LOOPBACK) && is_loopback_or_unix(address, addrlen)) {
+            return 0;
         }
 
         __u32 hits = __sync_fetch_and_add(&entry->strike_count, 1) + 1;
@@ -315,33 +333,8 @@ int BPF_PROG(moray_socket_strike, struct socket *sock, struct sockaddr *address,
         }
 
         /* Check if network posture permits loopback/IPC (ALLOW_LOOPBACK) */
-        if (effective_posture & MORAY_PERM_LOOPBACK) {
-            sa_family_t family = 0;
-            if (bpf_probe_read_kernel(&family, sizeof(family), &address->sa_family) == 0) {
-                if (family == AF_UNIX) {
-                    return 0; /* Loopback UNIX socket allowed under ALLOW_LOOPBACK */
-                }
-                if (family == AF_INET && addrlen >= sizeof(struct sockaddr_in)) {
-                    struct sockaddr_in in = {};
-                    if (bpf_probe_read_kernel(&in, sizeof(in), address) == 0) {
-                        __u32 host_ip = bpf_ntohl(in.sin_addr.s_addr);
-                        if ((host_ip & 0xFF000000) == 0x7F000000) {
-                            return 0; /* Loopback IPv4 allowed under ALLOW_LOOPBACK */
-                        }
-                    }
-                }
-                if (family == AF_INET6 && addrlen >= sizeof(struct sockaddr_in6)) {
-                    struct sockaddr_in6 in6 = {};
-                    if (bpf_probe_read_kernel(&in6, sizeof(in6), address) == 0) {
-                        if (in6.sin6_addr.in6_u.u6_addr32[0] == 0 &&
-                            in6.sin6_addr.in6_u.u6_addr32[1] == 0 &&
-                            in6.sin6_addr.in6_u.u6_addr32[2] == 0 &&
-                            in6.sin6_addr.in6_u.u6_addr32[3] == bpf_htonl(1)) {
-                            return 0; /* Loopback IPv6 allowed under ALLOW_LOOPBACK */
-                        }
-                    }
-                }
-            }
+        if ((effective_posture & MORAY_PERM_LOOPBACK) && is_loopback_or_unix(address, addrlen)) {
+            return 0; /* Loopback / IPC socket allowed under ALLOW_LOOPBACK */
         }
 
         /* Socket severed under autonomous boundary (DENY_ALL_NET or unauthorized WAN under ALLOW_LOOPBACK) */
@@ -351,6 +344,177 @@ int BPF_PROG(moray_socket_strike, struct socket *sock, struct sockaddr *address,
         bpf_printk("MORAY AUTO-STRIKE: Socket connect severed for '%s' (PID %d)\n", comm, tgid);
         emit_strike_event(pid, tgid, MORAY_ACT_BLOCK_SOCKET, -1, MORAY_HOOK_SOCKET, 1);
         return -1; /* -EPERM */
+    }
+
+    return 0;
+}
+
+/*
+ * Pharyngeal Strike 5: Sever Unauthorized Inbound Socket Binding
+ * Prevents rogue listener creation under DENY_ALL_NET and restricts bind()
+ * strictly to 127.0.0.1/::1/AF_UNIX under ALLOW_LOOPBACK.
+ */
+SEC("lsm/socket_bind")
+int BPF_PROG(moray_socket_bind, struct socket *sock, struct sockaddr *address, int addrlen)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 tgid = (__u32)(pid_tgid >> 32);
+    __u32 pid = (__u32)pid_tgid;
+
+    struct moray_quarantine_entry *entry = lookup_quarantine_entry(tgid, pid);
+
+    if (entry && (entry->action_flags & MORAY_ACT_BLOCK_SOCKET)) {
+        if ((entry->action_flags & MORAY_ACT_ALLOW_LOOPBACK) && is_loopback_or_unix(address, addrlen)) {
+            return 0; /* Loopback / IPC bind permitted */
+        }
+
+        __u32 hits = __sync_fetch_and_add(&entry->strike_count, 1) + 1;
+        bpf_printk("MORAY STRIKE: Intercepted socket bind from PID %d (hits: %d)\n", tgid, hits);
+        emit_strike_event(pid, tgid, entry->action_flags, -1, MORAY_HOOK_SOCKET_BIND, hits);
+
+        if ((entry->action_flags & MORAY_ACT_KILL) || hits >= MORAY_STRIKE_TIER3) {
+            bpf_send_signal(9); /* SIGKILL */
+        }
+        return -1; /* -EPERM */
+    }
+
+    struct moray_workload_entry *w_entry = lookup_workload_entry();
+    char sentinel_key[MORAY_COMM_LEN] = "__moray_auto__";
+    struct moray_boundary_entry *sentinel = bpf_map_lookup_elem(&moray_boundary_map, sentinel_key);
+
+    __u32 effective_posture = 0;
+    int is_governed = 0;
+
+    if (w_entry) {
+        effective_posture = w_entry->posture_flags;
+        is_governed = 1;
+    } else if (sentinel && !(sentinel->reserved & MORAY_BOUNDARY_FLAG_WORKLOAD)) {
+        effective_posture = sentinel->perm_flags;
+        is_governed = 1;
+    }
+
+    if (is_governed && !(effective_posture & MORAY_PERM_SOCKET) && address && addrlen > 0) {
+        char comm[MORAY_COMM_LEN] = {};
+        bpf_get_current_comm(comm, sizeof(comm));
+        struct moray_boundary_entry *b_entry = bpf_map_lookup_elem(&moray_boundary_map, comm);
+
+        if (b_entry && (b_entry->perm_flags & MORAY_PERM_SOCKET)) {
+            __sync_fetch_and_add(&b_entry->hit_count, 1);
+            if (w_entry) {
+                __sync_fetch_and_add(&w_entry->hit_count, 1);
+            }
+            return 0; /* Permitted for control plane daemon */
+        }
+
+        if ((effective_posture & MORAY_PERM_LOOPBACK) && is_loopback_or_unix(address, addrlen)) {
+            return 0; /* Loopback / IPC bind permitted under ALLOW_LOOPBACK */
+        }
+
+        if (w_entry) {
+            __sync_fetch_and_add(&w_entry->strike_count, 1);
+        }
+        bpf_printk("MORAY AUTO-STRIKE: Socket bind severed for '%s' (PID %d)\n", comm, tgid);
+        emit_strike_event(pid, tgid, MORAY_ACT_BLOCK_SOCKET, -1, MORAY_HOOK_SOCKET_BIND, 1);
+        return -1; /* -EPERM */
+    }
+
+    return 0;
+}
+
+/*
+ * Pharyngeal Strike 6: Sever Unauthorized Socket Allocation
+ * Prevents socket creation entirely under DENY_ALL_NET, and denies raw/packet
+ * socket creation under ALLOW_LOOPBACK to prevent unmediated frame crafting.
+ */
+SEC("lsm/socket_create")
+int BPF_PROG(moray_socket_create, int family, int type, int protocol, int kern)
+{
+    /* Always permit internal kernel sockets */
+    if (kern != 0) {
+        return 0;
+    }
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 tgid = (__u32)(pid_tgid >> 32);
+    __u32 pid = (__u32)pid_tgid;
+
+    struct moray_quarantine_entry *entry = lookup_quarantine_entry(tgid, pid);
+
+    if (entry && (entry->action_flags & MORAY_ACT_BLOCK_SOCKET)) {
+        int should_block = 0;
+        if (!(entry->action_flags & MORAY_ACT_ALLOW_LOOPBACK)) {
+            /* Total socket block: block network and IPC socket allocation */
+            if (family == AF_INET || family == AF_INET6 || family == AF_UNIX || family == AF_PACKET) {
+                should_block = 1;
+            }
+        } else {
+            /* Loopback permitted: strictly block raw socket creation */
+            if (family == AF_PACKET || type == SOCK_RAW) {
+                should_block = 1;
+            }
+        }
+
+        if (should_block) {
+            __u32 hits = __sync_fetch_and_add(&entry->strike_count, 1) + 1;
+            bpf_printk("MORAY STRIKE: Intercepted socket create from PID %d (hits: %d)\n", tgid, hits);
+            emit_strike_event(pid, tgid, entry->action_flags, -1, MORAY_HOOK_SOCKET_CREATE, hits);
+
+            if ((entry->action_flags & MORAY_ACT_KILL) || hits >= MORAY_STRIKE_TIER3) {
+                bpf_send_signal(9); /* SIGKILL */
+            }
+            return -1; /* -EPERM */
+        }
+    }
+
+    struct moray_workload_entry *w_entry = lookup_workload_entry();
+    char sentinel_key[MORAY_COMM_LEN] = "__moray_auto__";
+    struct moray_boundary_entry *sentinel = bpf_map_lookup_elem(&moray_boundary_map, sentinel_key);
+
+    __u32 effective_posture = 0;
+    int is_governed = 0;
+
+    if (w_entry) {
+        effective_posture = w_entry->posture_flags;
+        is_governed = 1;
+    } else if (sentinel && !(sentinel->reserved & MORAY_BOUNDARY_FLAG_WORKLOAD)) {
+        effective_posture = sentinel->perm_flags;
+        is_governed = 1;
+    }
+
+    if (is_governed && !(effective_posture & MORAY_PERM_SOCKET)) {
+        char comm[MORAY_COMM_LEN] = {};
+        bpf_get_current_comm(comm, sizeof(comm));
+        struct moray_boundary_entry *b_entry = bpf_map_lookup_elem(&moray_boundary_map, comm);
+
+        if (b_entry && (b_entry->perm_flags & MORAY_PERM_SOCKET)) {
+            __sync_fetch_and_add(&b_entry->hit_count, 1);
+            if (w_entry) {
+                __sync_fetch_and_add(&w_entry->hit_count, 1);
+            }
+            return 0; /* Permitted for control plane daemon */
+        }
+
+        int should_block = 0;
+        if (!(effective_posture & MORAY_PERM_LOOPBACK)) {
+            /* DENY_ALL_NET: Block all network and IPC socket allocation */
+            if (family == AF_INET || family == AF_INET6 || family == AF_UNIX || family == AF_PACKET) {
+                should_block = 1;
+            }
+        } else {
+            /* ALLOW_LOOPBACK: Block raw and packet sockets */
+            if (family == AF_PACKET || type == SOCK_RAW) {
+                should_block = 1;
+            }
+        }
+
+        if (should_block) {
+            if (w_entry) {
+                __sync_fetch_and_add(&w_entry->strike_count, 1);
+            }
+            bpf_printk("MORAY AUTO-STRIKE: Socket create severed for '%s' (PID %d)\n", comm, tgid);
+            emit_strike_event(pid, tgid, MORAY_ACT_BLOCK_SOCKET, -1, MORAY_HOOK_SOCKET_CREATE, 1);
+            return -1; /* -EPERM */
+        }
     }
 
     return 0;
