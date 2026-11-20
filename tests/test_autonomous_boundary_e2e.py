@@ -128,7 +128,9 @@ class TestAutonomousBoundaryE2E:
 
             boundary_map = mock_pin_dir / "boundary_map"
             assert boundary_map.exists()
-            assert boundary_map.stat().st_size == 32768  # 1024 entries * 32 bytes
+            assert (
+                boundary_map.stat().st_size == 40960
+            )  # 1024 entries * 40 bytes (24B key + 16B val)
 
             proc.send_signal(signal.SIGTERM)
             stdout, _ = proc.communicate(timeout=3)

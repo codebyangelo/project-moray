@@ -1,8 +1,8 @@
 # Project Moray: OS-Level Ring 0 eBPF Containment Architecture
 
 [![CI: Build & Invariant Suite](https://github.com/codebyangelo/project-moray/actions/workflows/ci.yml/badge.svg)](https://github.com/codebyangelo/project-moray/actions/workflows/ci.yml)
-[![MicroVM: 110/110 KVM Steps](https://img.shields.io/badge/MicroVM-110%2F110%20KVM%20Steps-brightgreen.svg)](#-verification--claims-truth-matrix)
-[![Tests: 183 Passed](https://img.shields.io/badge/Tests-183%20Passed-brightgreen.svg)](#-building--running)
+[![MicroVM: 120/120 KVM Steps](https://img.shields.io/badge/MicroVM-120%2F120%20KVM%20Steps-brightgreen.svg)](#-verification--claims-truth-matrix)
+[![Tests: 185 Passed](https://img.shields.io/badge/Tests-185%20Passed-brightgreen.svg)](#-building--running)
 [![License: GPL-2.0](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](LICENSE)
 [![Kernel: eBPF LSM | XDP](https://img.shields.io/badge/Kernel-eBPF%20LSM%20%7C%20XDP-green.svg)](#-quick-architecture-overview)
 [![Python: >=3.10](https://img.shields.io/badge/Python-%3E%3D3.10-blue.svg)](#-subsystems)
@@ -79,6 +79,7 @@ In adherence to the **Provenance & Chronology Invariant ($I_6$)** and strict hum
 | | **Multi-Stage Network Boundary Defense (`socket_create` & `socket_bind`)** | **Verified (Ring 0)** | 4-stage network defense: `lsm/socket_create` severs socket allocation & unconnected UDP (`sendto`) under `DENY_ALL_NET`, blocks `SOCK_RAW`/`AF_PACKET` under `ALLOW_LOOPBACK`; `lsm/socket_bind` severs wildcard (`0.0.0.0`) listener binding under `ALLOW_LOOPBACK` (`tests/run_live_kernel_test.sh` Steps 81–90). |
 | | **Manifest Schema & Fail-Closed Ingestion** | **Verified (Ring 0 & Hermetic)** | Strict JSON schema validation; unreviewed profiler suggestions (`SUGGESTION`) fail closed; explicit `--enforce-unreviewed` activation gate; comm length overflow rejection; CLI `--validate-manifest` gate (`tests/run_live_kernel_test.sh` Steps 91–100, `tests/test_manifest_schema.py`). |
 | | **Operational Health & Crash Recovery** | **Verified (Ring 0 & Hermetic)** | Subsystem health & readiness probes (`morayd --health`, `--readiness`, `--json`); stale pin recovery drill; emergency pin cleanup (`--clean-pins`); systemd `ExecStartPost` validation (`tests/run_live_kernel_test.sh` Steps 101–110, `tests/test_operational_health_recovery.py`). |
+| | **Multi-Tenant Workload Isolation & Real Autonomous Agent Proof** | **Verified (Ring 0 & Hermetic)** | Compound-key boundary whitelisting (`cgroup_id` + `comm`), multi-tenant heterogeneous agent isolation (Agent Alpha vs Agent Beta), real Python 3 agent runtime verification, and subshell/socket severance (`tests/run_live_kernel_test.sh` Steps 111–120, `tests/agent_workload.py`). |
 | **Tier 2: Partially Tested / Mock-Emulated** | **Cross-Repo Octopus Audit** | **Conditional CI** | Verified when Project Octopus sibling workspace is present; safely skipped without error in standalone CI runners. |
 | **Tier 3: Claimed in Threat Model / Roadmap** | **VFS Path Unlink Protection** | **In Progress (Phase 8)**| Pinned maps protected by OS permissions (`0700` root) and `lsm/bpf`; dedicated VFS LSM hooks (`file_unlink`) scheduled for Phase 8. |
 | | **IPv6 Wire-Rate Drops** | **Roadmap** | `moray_xdp_drop_map` currently keys on `__u32` IPv4 addresses; IPv6 128-bit keying scheduled for future release. |

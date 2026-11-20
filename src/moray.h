@@ -127,8 +127,18 @@ struct moray_event {
 };
 
 /*
+ * Autonomous Boundary Map Compound Key
+ * Key: cgroup_id (__u64) + comm (char[MORAY_COMM_LEN])
+ * Total size: 24 bytes (8-byte aligned)
+ */
+struct moray_boundary_key {
+    __u64 cgroup_id;             /* Cgroup ID (0 = host-wide fallback/sentinel) */
+    char  comm[MORAY_COMM_LEN];  /* Executable name (16 bytes, null-padded) */
+};
+
+/*
  * Autonomous Boundary Map Entry Value
- * Key: char comm[MORAY_COMM_LEN] (16 bytes)
+ * Key: struct moray_boundary_key (24 bytes)
  * Total size: 16 bytes (8-byte aligned)
  */
 struct moray_boundary_entry {
@@ -152,6 +162,7 @@ struct moray_workload_entry {
 #if !defined(__KERNEL__) && defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(sizeof(struct moray_quarantine_entry) == 24, "moray_quarantine_entry must be 24 bytes");
 _Static_assert(sizeof(struct moray_event) == 128, "moray_event must be 128 bytes");
+_Static_assert(sizeof(struct moray_boundary_key) == 24, "moray_boundary_key must be 24 bytes");
 _Static_assert(sizeof(struct moray_boundary_entry) == 16, "moray_boundary_entry must be 16 bytes");
 _Static_assert(sizeof(struct moray_workload_entry) == 24, "moray_workload_entry must be 24 bytes");
 #endif

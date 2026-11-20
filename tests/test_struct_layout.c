@@ -46,6 +46,12 @@ int main(void) {
     assert(MORAY_HOOK_SOCKET_BIND == 5);
     assert(MORAY_HOOK_SOCKET_CREATE == 6);
 
+    /* Verify moray_boundary_key */
+    printf("[-] sizeof(struct moray_boundary_key) = %zu\n", sizeof(struct moray_boundary_key));
+    assert(sizeof(struct moray_boundary_key) == 24);
+    assert(offsetof(struct moray_boundary_key, cgroup_id) == 0);
+    assert(offsetof(struct moray_boundary_key, comm) == 8);
+
     /* Verify moray_boundary_entry */
     printf("[-] sizeof(struct moray_boundary_entry) = %zu\n", sizeof(struct moray_boundary_entry));
     assert(sizeof(struct moray_boundary_entry) == 16);
