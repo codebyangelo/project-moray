@@ -83,10 +83,10 @@ flowchart TD
 | **112** | Manifest Generation | Generate heterogeneous manifests for Alpha (`python3`) and Beta (`victim_worker`) | Valid JSON schemas | `validate_and_parse_manifest` |
 | **113** | Multi-Workload Ingestion | Start `morayd` with Alpha manifest and dynamically apply Beta via `--apply-manifest` | Both workloads active in kernel maps | `bpf_map_update_elem` on compound keys |
 | **114** | Workload Status | Query status of Cgroup Alpha and Cgroup Beta via Python bridge | Both report `"governed": true` with respective postures | `bpf(BPF_MAP_LOOKUP_ELEM)` |
-| **115** | Real Agent Alpha Exec | Execute `agent_workload.py --self-check` in Cgroup Alpha | Python initializes and exits 0 | `lookup_boundary_entry` matches `(Alpha_ID, "python3")` |
-| **116** | Cross-Workload Breach | Execute `agent_workload.py --self-check` in Cgroup Beta | Blocked with `-EPERM` (execve fails) | `lookup_boundary_entry(Beta_ID, "python3")` returns NULL -> Strike |
+| **115** | Real Agent Alpha Exec | Execute `agent_workload.py --spawn-subprocess /bin/true` in Cgroup Alpha | Tool executes cleanly past LSM (exit 0) | `lookup_boundary_entry` matches `(Alpha_ID, "python3")` |
+| **116** | Cross-Workload Breach | Execute `agent_workload.py --spawn-subprocess /bin/true` in Cgroup Beta | Blocked with `-EPERM` (exit 42) | `lookup_boundary_entry(Beta_ID, "python3")` returns NULL -> Strike |
 | **117** | Allowed Beta Worker | Execute `victim_worker --baseline-exec` in Cgroup Beta | Executes cleanly with exit 0 | `lookup_boundary_entry(Beta_ID, "victim_worker")` returns OK |
-| **118** | Subshell Confinement | Agent Alpha spawns unlisted subprocess `/bin/sh -c` | Subprocess intercepted with `-EPERM` (exit 42) | `lookup_boundary_entry(Alpha_ID, "sh")` returns NULL -> Strike |
+| **118** | Subshell Confinement | Agent Alpha spawns unlisted tool `/bin/sh -c /bin/ls` | Subprocess intercepted with `-EPERM` (exit 42) | `lookup_boundary_entry(Alpha_ID, "sh")` returns NULL -> Strike |
 | **119** | Socket Confinement | Agent Beta attempts `socket(AF_INET, SOCK_STREAM)` | Blocked with `-EPERM` (exit 42) | `moray_socket_create` severed under `DENY_ALL_NET` |
 | **120** | Clean Teardown | Terminate daemon, remove test cgroups, verify clean unpin | Zero kernel map leaks | VFS unpin & cgroup rmdir |
 

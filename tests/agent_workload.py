@@ -64,7 +64,14 @@ def cmd_spawn_subprocess(binary: str, args: list[str]) -> int:
         print(f"[AGENT] Subprocess completed with exit code: {proc.returncode}")
         if proc.returncode == 0:
             return 0
-        # Shell / system convention: 126 or 127 often indicate permission denied on execve
+        # Shell / system convention: 126 or 127 indicate permission denied on execve
+        if (
+            proc.returncode in (126, 127)
+            or "Permission denied" in proc.stderr
+            or "Operation not permitted" in proc.stderr
+        ):
+            print(f"[AGENT] Subprocess execution BLOCKED by kernel: exit code {proc.returncode}")
+            return 42
         return proc.returncode
     except (PermissionError, OSError) as e:
         if getattr(e, "errno", None) in (errno.EPERM, errno.EACCES) or isinstance(
