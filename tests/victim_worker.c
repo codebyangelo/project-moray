@@ -111,7 +111,7 @@ int main(int argc, char **argv) {
 
     const char *cmd = find_command(argc, argv);
     if (!cmd || strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0) {
-        fprintf(stdout, "Usage: %s <--baseline-exec|--assert-unlisted-exec|--wait-and-exec|--wait-and-bpf|--wait-and-connect-wan|--wait-and-connect-loopback|--wait-and-connect-unix|--wait-and-assert-loopback-blocked|--fork-race|--multi-strike-loop|--burst-syscalls> [--cgroup <dir>]\n", argv[0]);
+        fprintf(stdout, "Usage: %s <--baseline-exec|--assert-unlisted-exec|--wait-and-exec|--wait-and-bpf|--wait-and-connect-wan|--wait-and-connect-loopback|--wait-and-connect-unix|--wait-and-assert-loopback-blocked|--assert-socket-create-blocked|--assert-raw-socket-blocked|--assert-bind-wan-blocked|--assert-bind-loopback-allowed|--assert-unconnected-udp-blocked|--fork-race|--multi-strike-loop|--burst-syscalls> [--cgroup <dir>]\n", argv[0]);
         return (cmd && (strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0)) ? 0 : 1;
     }
 
@@ -323,6 +323,91 @@ int main(int argc, char **argv) {
         fprintf(stdout, "[VICTIM] loopback-blocked connect ret=%d, errno=%d (%s)\n", ret, err, strerror(err));
         if (ret < 0 && (err == EPERM || err == EACCES)) {
             return 48; /* Success: Loopback was strictly blocked with -EPERM */
+        }
+        return 1;
+    } else if (strcmp(cmd, "--assert-socket-create-blocked") == 0) {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        int err = errno;
+        if (fd >= 0) {
+            close(fd);
+            fprintf(stdout, "[VICTIM] socket(AF_INET, SOCK_STREAM) unexpectedly SUCCEEDED: fd=%d\n", fd);
+            return 1;
+        }
+        fprintf(stdout, "[VICTIM] socket(AF_INET, SOCK_STREAM) failed: %d (%s)\n", err, strerror(err));
+        if (err == EPERM || err == EACCES) {
+            return 55; /* Success: Kernel severed socket creation with -EPERM */
+        }
+        return 1;
+    } else if (strcmp(cmd, "--assert-raw-socket-blocked") == 0) {
+        int fd = socket(AF_INET, SOCK_RAW, 0);
+        int err = errno;
+        if (fd >= 0) {
+            close(fd);
+            fprintf(stdout, "[VICTIM] socket(AF_INET, SOCK_RAW) unexpectedly SUCCEEDED: fd=%d\n", fd);
+            return 1;
+        }
+        fprintf(stdout, "[VICTIM] socket(AF_INET, SOCK_RAW) failed: %d (%s)\n", err, strerror(err));
+        if (err == EPERM || err == EACCES) {
+            return 56; /* Success: Kernel severed raw socket creation with -EPERM */
+        }
+        return 1;
+    } else if (strcmp(cmd, "--assert-bind-wan-blocked") == 0) {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) {
+            int err = errno;
+            fprintf(stdout, "[VICTIM] socket(AF_INET) failed: %d (%s)\n", err, strerror(err));
+            return (err == EPERM || err == EACCES) ? 57 : 1;
+        }
+
+        struct sockaddr_in saddr;
+        memset(&saddr, 0, sizeof(saddr));
+        saddr.sin_family = AF_INET;
+        saddr.sin_port = htons(8888);
+        saddr.sin_addr.s_addr = htonl(INADDR_ANY); /* 0.0.0.0 */
+
+        int ret = bind(fd, (struct sockaddr *)&saddr, sizeof(saddr));
+        int err = errno;
+        close(fd);
+
+        fprintf(stdout, "[VICTIM] bind to 0.0.0.0:8888 ret=%d, errno=%d (%s)\n", ret, err, strerror(err));
+        if (ret < 0 && (err == EPERM || err == EACCES)) {
+            return 57; /* Success: External/wildcard bind severed by LSM with -EPERM */
+        }
+        return 1;
+    } else if (strcmp(cmd, "--assert-bind-loopback-allowed") == 0) {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) {
+            int err = errno;
+            fprintf(stdout, "[VICTIM] socket(AF_INET) failed: %d (%s)\n", err, strerror(err));
+            return 1;
+        }
+
+        struct sockaddr_in saddr;
+        memset(&saddr, 0, sizeof(saddr));
+        saddr.sin_family = AF_INET;
+        saddr.sin_port = htons(0); /* ephemeral port */
+        saddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); /* 127.0.0.1 */
+
+        int ret = bind(fd, (struct sockaddr *)&saddr, sizeof(saddr));
+        int err = errno;
+        close(fd);
+
+        fprintf(stdout, "[VICTIM] bind to 127.0.0.1:0 ret=%d, errno=%d (%s)\n", ret, err, strerror(err));
+        if (ret == 0) {
+            return 58; /* Success: Loopback bind permitted past LSM */
+        }
+        return 1;
+    } else if (strcmp(cmd, "--assert-unconnected-udp-blocked") == 0) {
+        int fd = socket(AF_INET, SOCK_DGRAM, 0);
+        int err = errno;
+        if (fd >= 0) {
+            close(fd);
+            fprintf(stdout, "[VICTIM] socket(AF_INET, SOCK_DGRAM) unexpectedly SUCCEEDED: fd=%d\n", fd);
+            return 1;
+        }
+        fprintf(stdout, "[VICTIM] socket(AF_INET, SOCK_DGRAM) failed: %d (%s)\n", err, strerror(err));
+        if (err == EPERM || err == EACCES) {
+            return 59; /* Success: UDP socket creation severed with -EPERM */
         }
         return 1;
     } else if (strcmp(cmd, "--fork-race") == 0) {

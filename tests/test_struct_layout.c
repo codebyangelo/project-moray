@@ -39,6 +39,12 @@ int main(void) {
     assert(offsetof(struct moray_event, target_info) == 48);
     assert(offsetof(struct moray_event, drop_count) == 112);
     assert(offsetof(struct moray_event, reserved) == 120);
+    assert(MORAY_HOOK_BPRM == 1);
+    assert(MORAY_HOOK_SOCKET == 2);
+    assert(MORAY_HOOK_BPF_TAMPER == 3);
+    assert(MORAY_HOOK_XDP == 4);
+    assert(MORAY_HOOK_SOCKET_BIND == 5);
+    assert(MORAY_HOOK_SOCKET_CREATE == 6);
 
     /* Verify moray_boundary_entry */
     printf("[-] sizeof(struct moray_boundary_entry) = %zu\n", sizeof(struct moray_boundary_entry));

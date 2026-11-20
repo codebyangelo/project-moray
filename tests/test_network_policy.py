@@ -36,6 +36,22 @@ class TestNetworkPolicyConstants:
         assert (MORAY_ACT_ALLOW_LOOPBACK & MORAY_ACT_DROP_NET) == 0
         assert (MORAY_ACT_ALLOW_LOOPBACK & MORAY_ACT_KILL) == 0
 
+    def test_extended_socket_hook_constants(self) -> None:
+        from bridge.lobster_hook import (
+            MORAY_HOOK_SOCKET_BIND,
+            MORAY_HOOK_SOCKET_CREATE,
+            MorayEvent,
+        )
+
+        assert MORAY_HOOK_SOCKET_BIND == 5
+        assert MORAY_HOOK_SOCKET_CREATE == 6
+
+        ev_bind = MorayEvent(hook_point=MORAY_HOOK_SOCKET_BIND)
+        assert ev_bind.to_dict()["hook_name"] == "SOCKET_BIND"
+
+        ev_create = MorayEvent(hook_point=MORAY_HOOK_SOCKET_CREATE)
+        assert ev_create.to_dict()["hook_name"] == "SOCKET_CREATE"
+
     def test_full_strike_mask_encompasses_loopback_bit(self) -> None:
         # Full strike mask is 0xFF, which includes 0x10
         assert (MORAY_ACT_FULL_STRIKE & MORAY_ACT_ALLOW_LOOPBACK) == MORAY_ACT_ALLOW_LOOPBACK

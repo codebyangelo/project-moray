@@ -77,10 +77,12 @@ typedef uint32_t __be32;
 #define MORAY_REASON_TAMPER_ATTEMPT   4U  /* Tampering with eBPF programs or maps */
 
 /* Hook Identification Codes */
-#define MORAY_HOOK_BPRM         1U
-#define MORAY_HOOK_SOCKET       2U
-#define MORAY_HOOK_BPF_TAMPER   3U
-#define MORAY_HOOK_XDP          4U
+#define MORAY_HOOK_BPRM          1U
+#define MORAY_HOOK_SOCKET        2U
+#define MORAY_HOOK_BPF_TAMPER    3U
+#define MORAY_HOOK_XDP           4U
+#define MORAY_HOOK_SOCKET_BIND   5U
+#define MORAY_HOOK_SOCKET_CREATE 6U
 
 /* Policy State Codes */
 #define MORAY_STATE_ACTIVE      1U  /* Actively enforced */

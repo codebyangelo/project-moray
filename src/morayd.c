@@ -229,6 +229,8 @@ struct moray_bpf_context {
     struct bpf_object *obj;
     struct bpf_link *link_bprm;
     struct bpf_link *link_socket;
+    struct bpf_link *link_bind;
+    struct bpf_link *link_create;
     struct bpf_link *link_bpf;
     struct bpf_link *link_xdp;
     struct bpf_map *map_quarantine;
@@ -289,6 +291,26 @@ static int load_and_attach_bpf(const char *bpf_obj_path, const char *pin_dir, st
             fprintf(stderr, "[-] Warning: Failed to attach moray_socket_strike: %s\n", strerror(errno));
         } else {
             fprintf(stdout, "[+] Attached LSM hook: socket_connect (moray_socket_strike)\n");
+        }
+    }
+
+    struct bpf_program *prog_bind = bpf_object__find_program_by_name(ctx->obj, "moray_socket_bind");
+    if (prog_bind) {
+        ctx->link_bind = bpf_program__attach_lsm(prog_bind);
+        if (!ctx->link_bind) {
+            fprintf(stderr, "[-] Warning: Failed to attach moray_socket_bind: %s\n", strerror(errno));
+        } else {
+            fprintf(stdout, "[+] Attached LSM hook: socket_bind (moray_socket_bind)\n");
+        }
+    }
+
+    struct bpf_program *prog_create = bpf_object__find_program_by_name(ctx->obj, "moray_socket_create");
+    if (prog_create) {
+        ctx->link_create = bpf_program__attach_lsm(prog_create);
+        if (!ctx->link_create) {
+            fprintf(stderr, "[-] Warning: Failed to attach moray_socket_create: %s\n", strerror(errno));
+        } else {
+            fprintf(stdout, "[+] Attached LSM hook: socket_create (moray_socket_create)\n");
         }
     }
 
@@ -395,6 +417,8 @@ static void cleanup_bpf(struct moray_bpf_context *ctx, const char *pin_dir) {
     if (!ctx) return;
     if (ctx->link_bprm) bpf_link__destroy(ctx->link_bprm);
     if (ctx->link_socket) bpf_link__destroy(ctx->link_socket);
+    if (ctx->link_bind) bpf_link__destroy(ctx->link_bind);
+    if (ctx->link_create) bpf_link__destroy(ctx->link_create);
     if (ctx->link_bpf) bpf_link__destroy(ctx->link_bpf);
     if (ctx->link_xdp) {
         bpf_link__destroy(ctx->link_xdp);

@@ -44,6 +44,8 @@ MORAY_HOOK_BPRM: int = 1
 MORAY_HOOK_SOCKET: int = 2
 MORAY_HOOK_BPF_TAMPER: int = 3
 MORAY_HOOK_XDP: int = 4
+MORAY_HOOK_SOCKET_BIND: int = 5
+MORAY_HOOK_SOCKET_CREATE: int = 6
 
 # Policy State Codes matching src/moray.h
 MORAY_STATE_ACTIVE: int = 1
@@ -140,6 +142,8 @@ class MorayEvent(ctypes.Structure):
             MORAY_HOOK_SOCKET: "SOCKET_CONNECT",
             MORAY_HOOK_BPF_TAMPER: "BPF_ANTI_TAMPER",
             MORAY_HOOK_XDP: "XDP_FILTER",
+            MORAY_HOOK_SOCKET_BIND: "SOCKET_BIND",
+            MORAY_HOOK_SOCKET_CREATE: "SOCKET_CREATE",
         }
         comm_str = self.comm.decode("utf-8", errors="replace").rstrip("\x00")
         target_str = self.target_info.decode("utf-8", errors="replace").rstrip("\x00")
