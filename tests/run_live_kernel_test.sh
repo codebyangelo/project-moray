@@ -1805,15 +1805,20 @@ cat <<'EOF' > /tmp/moray_boundary_op.json
   "version": "1.0.0",
   "target_name": "moray_op_a",
   "policy_state": "ENFORCED",
-  "network_posture": "DENY_ALL_NET",
-  "strike_policy": "AUTONOMOUS_STRIKE",
-  "allowed_comms": [
-    "python3",
-    "sh",
-    "victim_worker",
-    "morayd"
-  ],
-  "audit_notice": "Operational confidence and recovery test manifest"
+  "generated_at": 1731900000,
+  "boundary_policy": {
+    "default_action": "AUTONOMOUS_STRIKE",
+    "allowed_comms": [
+      "morayd",
+      "victim_worker",
+      "python3",
+      "sh"
+    ],
+    "network_posture": "DENY_ALL_NET",
+    "cgroup_slice": "/sys/fs/cgroup/moray_op_a",
+    "auto_quarantine_violations": true,
+    "max_strike_threshold": 5
+  }
 }
 EOF
 
@@ -1913,8 +1918,10 @@ fi
 echo "[+] EMPIRICAL PROOF: morayd automatically recovered and re-pinned stale kernel maps!"
 
 echo "[*] Step 107: Verifying Ring 0 enforcement persists after daemon recovery..."
+ensure_victim_worker
+prepare_unlisted_worker
 RET_VAL_UNLISTED=0
-./bin/victim_worker --cgroup "$CGROUP_OP_A" --test-exec unlisted_op_worker || RET_VAL_UNLISTED=$?
+/tmp/unlisted_worker --assert-unlisted-exec --cgroup "$CGROUP_OP_A" || RET_VAL_UNLISTED=$?
 if [ "$RET_VAL_UNLISTED" -ne 42 ]; then
     echo "[-] FATAL: Unlisted execution was NOT blocked after daemon recovery! Return code: $RET_VAL_UNLISTED (expected 42)"
     exit 1
@@ -1943,7 +1950,7 @@ echo "[*] Step 110: Clean teardown, unpin verification, and zero kernel leak che
 kill -TERM "$RECOVERY_DAEMON_PID"
 sleep 1
 rmdir "$CGROUP_OP_A" 2>/dev/null || true
-rm -f /tmp/moray_boundary_op.json /tmp/moray_health*.log /tmp/moray_health.json /tmp/bridge_health.json /tmp/clean_pins.log /tmp/morayd_recovery.log /tmp/preflight_run.log /tmp/morayd_op*.log
+rm -f /tmp/unlisted_worker /tmp/moray_boundary_op.json /tmp/moray_health*.log /tmp/moray_health.json /tmp/bridge_health.json /tmp/clean_pins.log /tmp/morayd_recovery.log /tmp/preflight_run.log /tmp/morayd_op*.log
 rm -rf /sys/fs/bpf/moray
 echo "[+] EMPIRICAL PROOF: Clean teardown completed; all pinned artifacts cleanly unlinked!"
 }
