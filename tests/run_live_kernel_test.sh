@@ -54,7 +54,7 @@ if [ "$TARGET_DOMAIN" = "help" ]; then
 fi
 
 ensure_victim_worker() {
-    if [ ! -x "$VICTIM_BIN" ]; then
+    if [ ! -x "$VICTIM_BIN" ] || [ "$REPO_ROOT/tests/victim_worker.c" -nt "$VICTIM_BIN" ]; then
         echo "[*] Compiling immutable test fixture worker ($VICTIM_BIN)..."
         mkdir -p "$REPO_ROOT/bin"
         gcc -Wall -Wextra -O2 -std=c11 tests/victim_worker.c -o "$VICTIM_BIN"
@@ -1336,7 +1336,7 @@ prepare_unlisted_worker
 
 # 1. Unlisted binary inside Governed Workload A -> must be severed with -EPERM (exit code 42)
 RET_UNLISTED_A=0
-/tmp/unlisted_worker --cgroup "$CGROUP_WORKLOAD_A" --assert-unlisted-exec || RET_UNLISTED_A=$?
+/tmp/unlisted_worker --assert-unlisted-exec --cgroup "$CGROUP_WORKLOAD_A" || RET_UNLISTED_A=$?
 if [ "$RET_UNLISTED_A" -ne 42 ]; then
     echo "[-] FATAL: Unlisted binary was NOT blocked inside governed Workload A! Return code: $RET_UNLISTED_A (expected 42)"
     exit 1
@@ -1345,7 +1345,7 @@ echo "[+] EMPIRICAL PROOF: Unlisted binary was autonomously severed with -EPERM 
 
 # 2. Unlisted binary inside Ungoverned Workload B -> must execute cleanly with zero latency (exit code 0)
 RET_UNLISTED_B=0
-/tmp/unlisted_worker --cgroup "$CGROUP_WORKLOAD_B" --baseline-exec || RET_UNLISTED_B=$?
+/tmp/unlisted_worker --baseline-exec --cgroup "$CGROUP_WORKLOAD_B" || RET_UNLISTED_B=$?
 if [ "$RET_UNLISTED_B" -ne 0 ]; then
     echo "[-] FATAL: Unlisted binary was unexpectedly blocked inside ungoverned Workload B! Return code: $RET_UNLISTED_B (expected 0)"
     exit 1
@@ -1355,7 +1355,7 @@ echo "[+] EMPIRICAL PROOF: Non-interference verified! Identical unlisted binary 
 echo "[*] Step 76: Testing dual-workload WAN socket non-interference (same binary victim_worker)..."
 # 1. Inside Governed Workload A: Outbound WAN must be blocked with -EPERM (return code 44)
 RET_WAN_A=0
-"$VICTIM_BIN" --cgroup "$CGROUP_WORKLOAD_A" --connect-wan 1.1.1.1 80 || RET_WAN_A=$?
+"$VICTIM_BIN" --connect-wan 1.1.1.1 80 --cgroup "$CGROUP_WORKLOAD_A" || RET_WAN_A=$?
 if [ "$RET_WAN_A" -ne 44 ]; then
     echo "[-] FATAL: WAN socket was NOT blocked inside governed Workload A! Return code: $RET_WAN_A (expected 44)"
     exit 1
@@ -1364,7 +1364,7 @@ echo "[+] EMPIRICAL PROOF: WAN socket severed with -EPERM for victim_worker insi
 
 # 2. Inside Ungoverned Workload B: Outbound WAN must bypass LSM check (return code 43)
 RET_WAN_B=0
-"$VICTIM_BIN" --cgroup "$CGROUP_WORKLOAD_B" --connect-wan 1.1.1.1 80 || RET_WAN_B=$?
+"$VICTIM_BIN" --connect-wan 1.1.1.1 80 --cgroup "$CGROUP_WORKLOAD_B" || RET_WAN_B=$?
 if [ "$RET_WAN_B" -ne 43 ]; then
     echo "[-] FATAL: WAN socket was blocked inside ungoverned Workload B! Return code: $RET_WAN_B (expected 43)"
     exit 1
@@ -1374,7 +1374,7 @@ echo "[+] EMPIRICAL PROOF: Non-interference verified! WAN socket permitted for i
 echo "[*] Step 77: Testing dual-workload loopback socket execution under ALLOW_LOOPBACK..."
 # Inside Governed Workload A: Loopback permitted (return code 45)
 RET_LOOP_A=0
-"$VICTIM_BIN" --cgroup "$CGROUP_WORKLOAD_A" --connect-loopback 80 || RET_LOOP_A=$?
+"$VICTIM_BIN" --connect-loopback 80 --cgroup "$CGROUP_WORKLOAD_A" || RET_LOOP_A=$?
 if [ "$RET_LOOP_A" -ne 45 ]; then
     echo "[-] FATAL: Loopback socket connect failed inside governed Workload A! Return code: $RET_LOOP_A (expected 45)"
     exit 1
@@ -1383,7 +1383,7 @@ echo "[+] EMPIRICAL PROOF: Loopback socket connect permitted inside governed Wor
 
 # Inside Ungoverned Workload B: Loopback permitted (return code 45)
 RET_LOOP_B=0
-"$VICTIM_BIN" --cgroup "$CGROUP_WORKLOAD_B" --connect-loopback 80 || RET_LOOP_B=$?
+"$VICTIM_BIN" --connect-loopback 80 --cgroup "$CGROUP_WORKLOAD_B" || RET_LOOP_B=$?
 if [ "$RET_LOOP_B" -ne 45 ]; then
     echo "[-] FATAL: Loopback socket connect failed inside ungoverned Workload B! Return code: $RET_LOOP_B (expected 45)"
     exit 1
@@ -1396,7 +1396,7 @@ mkdir -p "$CGROUP_CHILD_A"
 echo "[+] Created nested child cgroup: $CGROUP_CHILD_A"
 
 RET_CHILD_WAN=0
-"$VICTIM_BIN" --cgroup "$CGROUP_CHILD_A" --connect-wan 1.1.1.1 80 || RET_CHILD_WAN=$?
+"$VICTIM_BIN" --connect-wan 1.1.1.1 80 --cgroup "$CGROUP_CHILD_A" || RET_CHILD_WAN=$?
 if [ "$RET_CHILD_WAN" -ne 44 ]; then
     echo "[-] FATAL: WAN socket was NOT blocked in child cgroup! Return code: $RET_CHILD_WAN (expected 44)"
     exit 1
@@ -1409,7 +1409,7 @@ $MORAY_HOOK --map-path /sys/fs/bpf/moray/quarantine_map --workload-map-path /sys
 echo "[+] Dynamically registered Workload B under DENY_ALL_NET."
 
 RET_DYNAMIC_LOOP=0
-"$VICTIM_BIN" --cgroup "$CGROUP_WORKLOAD_B" --connect-loopback 80 || RET_DYNAMIC_LOOP=$?
+"$VICTIM_BIN" --connect-loopback 80 --cgroup "$CGROUP_WORKLOAD_B" || RET_DYNAMIC_LOOP=$?
 if [ "$RET_DYNAMIC_LOOP" -ne 48 ]; then
     echo "[-] FATAL: Dynamically governed Workload B did not block loopback under DENY_ALL_NET! Return code: $RET_DYNAMIC_LOOP (expected 48)"
     exit 1
@@ -1421,7 +1421,7 @@ $MORAY_HOOK --map-path /sys/fs/bpf/moray/quarantine_map --workload-map-path /sys
 echo "[+] Dynamically released Workload B from governance."
 
 RET_RELEASED_LOOP=0
-"$VICTIM_BIN" --cgroup "$CGROUP_WORKLOAD_B" --connect-loopback 80 || RET_RELEASED_LOOP=$?
+"$VICTIM_BIN" --connect-loopback 80 --cgroup "$CGROUP_WORKLOAD_B" || RET_RELEASED_LOOP=$?
 if [ "$RET_RELEASED_LOOP" -ne 45 ]; then
     echo "[-] FATAL: Released Workload B failed to permit loopback! Return code: $RET_RELEASED_LOOP (expected 45)"
     exit 1
