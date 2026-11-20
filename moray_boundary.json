@@ -2,8 +2,10 @@
   "version": "1.0.0",
   "target_name": "project-moray",
   "target_path": "/root/home/projects/project-moray",
+  "policy_state": "ENFORCED",
   "generated_by": "Project Moray Native Profiler (moray_profiler.py)",
-  "timestamp": "2026-11-07T17:28:04.982983+00:00",
+  "timestamp": "2026-11-20T12:00:00.000000+00:00",
+  "audit_notice": "Policy reviewed and authorized for kernel enforcement.",
   "boundary_policy": {
     "default_action": "AUTONOMOUS_STRIKE",
     "allowed_comms": [

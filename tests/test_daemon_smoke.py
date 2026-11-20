@@ -104,7 +104,7 @@ class TestDaemonSmokeLifecycle:
         """Daemon accepts --auto-harden and initializes boundary defense."""
         manifest = tmp_path / "moray_boundary.json"
         manifest.write_text(
-            '{"boundary_policy": {"allowed_comms": ["python3", "morayd"], "network_posture": "ALLOW_LOOPBACK"}}'
+            '{"version": "1.0.0", "target_name": "smoke-test", "policy_state": "ENFORCED", "boundary_policy": {"default_action": "AUTONOMOUS_STRIKE", "allowed_comms": ["python3", "morayd"], "network_posture": "ALLOW_LOOPBACK"}}'
         )
 
         mock_pin_dir = tmp_path / "moray_auto_pin"

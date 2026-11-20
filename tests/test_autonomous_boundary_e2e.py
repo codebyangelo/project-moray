@@ -72,6 +72,8 @@ class TestAutonomousBoundaryE2E:
 
         assert manifest["version"] == "1.0.0"
         assert manifest["target_name"] == "project-moray"
+        assert manifest["policy_state"] == "SUGGESTION"
+        assert manifest["confidence"] == "HEURISTIC"
         policy = manifest["boundary_policy"]
         assert policy["default_action"] == "AUTONOMOUS_STRIKE"
         assert policy["network_posture"] in ("ALLOW_LOOPBACK", "REQUIRE_WAN")
@@ -79,12 +81,17 @@ class TestAutonomousBoundaryE2E:
         assert "python3" in policy["allowed_comms"]
         assert "make" in policy["allowed_comms"]
 
+        # Verify --approve / ENFORCED generation
+        approved_manifest = profiler.generate_manifest(policy_state="ENFORCED")
+        assert approved_manifest["policy_state"] == "ENFORCED"
+
         out_file = tmp_path / "moray_boundary.json"
-        profiler.write_manifest(out_file)
+        profiler.write_manifest(out_file, policy_state="ENFORCED")
         assert out_file.exists()
 
         with open(out_file, encoding="utf-8") as f:
             data = json.load(f)
+        assert data["policy_state"] == "ENFORCED"
         assert data["boundary_policy"]["default_action"] == "AUTONOMOUS_STRIKE"
 
     def test_e2e_morayd_auto_harden_startup(self, tmp_path: Path) -> None:
@@ -97,6 +104,7 @@ class TestAutonomousBoundaryE2E:
         manifest_data = {
             "version": "1.0.0",
             "target_name": "test-agent",
+            "policy_state": "ENFORCED",
             "boundary_policy": {
                 "default_action": "AUTONOMOUS_STRIKE",
                 "allowed_comms": ["morayd", "victim_worker", "python3"],
@@ -162,6 +170,7 @@ class TestAutonomousBoundaryE2E:
         manifest_data = {
             "version": "1.0.0",
             "target_name": "test-agent",
+            "policy_state": "ENFORCED",
             "boundary_policy": {
                 "default_action": "AUTONOMOUS_STRIKE",
                 "allowed_comms": ["morayd", "victim_worker"],
@@ -194,6 +203,7 @@ class TestAutonomousBoundaryE2E:
         manifest_deny_data = {
             "version": "1.0.0",
             "target_name": "test-agent-isolated",
+            "policy_state": "ENFORCED",
             "boundary_policy": {
                 "default_action": "AUTONOMOUS_STRIKE",
                 "allowed_comms": ["morayd", "victim_worker"],
@@ -237,6 +247,7 @@ class TestAutonomousBoundaryE2E:
         manifest_wan_data = {
             "version": "1.0.0",
             "target_name": "test-agent-wan",
+            "policy_state": "ENFORCED",
             "boundary_policy": {
                 "default_action": "AUTONOMOUS_STRIKE",
                 "allowed_comms": ["morayd", "victim_worker"],
@@ -277,6 +288,7 @@ class TestAutonomousBoundaryE2E:
         bad_data = {
             "version": "1.0.0",
             "target_name": "bad-agent",
+            "policy_state": "ENFORCED",
             "boundary_policy": {
                 "default_action": "AUTONOMOUS_STRIKE",
                 "allowed_comms": ["unlisted_worker"],
@@ -319,6 +331,8 @@ class TestAutonomousBoundaryE2E:
             json.dumps(
                 {
                     "version": "1.0.0",
+                    "target_name": "test-no-daemon",
+                    "policy_state": "ENFORCED",
                     "boundary_policy": {
                         "default_action": "AUTONOMOUS_STRIKE",
                         "allowed_comms": ["victim_worker"],
