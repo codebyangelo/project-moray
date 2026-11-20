@@ -1124,6 +1124,10 @@ echo "  [+] DOMAIN 10: WORKLOAD-SCOPED BOUNDARY & NON-INTERFERENCE"
 echo "=========================================================="
 
 echo "[*] Step 71: Setting up dual cgroup v2 testing hierarchies (Workload A & Workload B)..."
+if [ ! -x /tmp/victim_worker ]; then
+    gcc -Wall -Wextra -O2 tests/victim_worker.c -o /tmp/victim_worker
+    chmod +x /tmp/victim_worker
+fi
 CGROUP_WORKLOAD_A="/sys/fs/cgroup/moray_workload_a"
 CGROUP_WORKLOAD_B="/sys/fs/cgroup/moray_workload_b"
 mkdir -p "$CGROUP_WORKLOAD_A" "$CGROUP_WORKLOAD_B"
