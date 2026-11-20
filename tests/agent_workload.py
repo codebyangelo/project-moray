@@ -176,6 +176,9 @@ def main() -> int:
     parser.add_argument(
         "--spawn-subprocess", type=str, default="", help="Binary to spawn as subprocess"
     )
+    parser.add_argument(
+        "--subargs", type=str, default="", help="Raw argument string for subprocess"
+    )
     parser.add_argument("--args", nargs="*", default=[], help="Arguments for subprocess")
     parser.add_argument("--connect-wan", type=str, default="", help="IP to connect via WAN")
     parser.add_argument("--port", type=int, default=80, help="Port for network connects")
@@ -192,7 +195,12 @@ def main() -> int:
     if args.self_check:
         return cmd_self_check()
     if args.spawn_subprocess:
-        return cmd_spawn_subprocess(args.spawn_subprocess, args.args)
+        sub_args = list(args.args)
+        if args.subargs:
+            import shlex
+
+            sub_args = shlex.split(args.subargs)
+        return cmd_spawn_subprocess(args.spawn_subprocess, sub_args)
     if args.connect_wan:
         return cmd_connect_wan(args.connect_wan, args.port)
     if args.connect_loopback:

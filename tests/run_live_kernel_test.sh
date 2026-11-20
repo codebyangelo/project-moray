@@ -2094,7 +2094,7 @@ echo "[+] EMPIRICAL PROOF: Allowed binary executed cleanly in Workload Beta whil
 
 echo "[*] Step 118: Unlisted subshell execution attempt inside Workload Alpha (sh blocked)..."
 RET_SH_BREACH=0
-python3 tests/agent_workload.py --cgroup "$CGROUP_AGENT_A" --spawn-subprocess /bin/sh --args -c "/bin/ls" || RET_SH_BREACH=$?
+python3 tests/agent_workload.py --cgroup "$CGROUP_AGENT_A" --spawn-subprocess /bin/sh --subargs "-c /bin/ls" || RET_SH_BREACH=$?
 if [ "$RET_SH_BREACH" -ne 42 ]; then
     echo "[-] FATAL: Unlisted subshell /bin/sh was permitted inside Workload Alpha! Return code: $RET_SH_BREACH"
     exit 1
