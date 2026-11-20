@@ -224,7 +224,7 @@ int main(int argc, char **argv) {
         if (fd < 0) {
             int err = errno;
             fprintf(stdout, "[VICTIM] socket(AF_INET) failed: %d (%s)\n", err, strerror(err));
-            return 1;
+            return (err == EPERM || err == EACCES) ? 48 : 1;
         }
 
         struct sockaddr_in saddr;
@@ -267,7 +267,7 @@ int main(int argc, char **argv) {
         if (fd < 0) {
             int err = errno;
             fprintf(stdout, "[VICTIM] socket(AF_UNIX) failed: %d (%s)\n", err, strerror(err));
-            return 1;
+            return (err == EPERM || err == EACCES) ? 49 : 1;
         }
 
         struct sockaddr_un saddr;
