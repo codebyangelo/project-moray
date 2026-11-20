@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <ctype.h>
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
@@ -519,9 +520,307 @@ static void seed_default_boundary(int map_fd, int map_workload_fd, const char *c
 }
 
 /*
- * Auto-Harden: Parses moray_boundary.json and seeds allowed executables and posture
+ * JSON Helper functions for strict zero-dependency manifest validation
  */
-static int seed_boundary_manifest(int map_fd, int map_workload_fd, const char *manifest_path, const char *cgroup_target) {
+static const char *skip_ws(const char *p) {
+    while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) {
+        p++;
+    }
+    return p;
+}
+
+static int json_get_string(const char *json, const char *key, char *out, size_t out_sz) {
+    if (!json || !key || !out || out_sz == 0) return -1;
+
+    char search_key[128];
+    snprintf(search_key, sizeof(search_key), "\"%s\"", key);
+
+    const char *p = strstr(json, search_key);
+    if (!p) return -1;
+
+    p += strlen(search_key);
+    p = skip_ws(p);
+    if (*p != ':') return -1;
+    p++;
+    p = skip_ws(p);
+    if (*p != '"') return -1;
+    p++;
+
+    const char *end = strchr(p, '"');
+    if (!end) return -1;
+
+    size_t len = (size_t)(end - p);
+    if (len >= out_sz) return -1;
+
+    memcpy(out, p, len);
+    out[len] = '\0';
+    return (int)len;
+}
+
+static int json_get_object_bounds(const char *json, const char *key, const char **obj_start, const char **obj_end) {
+    if (!json || !key || !obj_start || !obj_end) return -1;
+
+    char search_key[128];
+    snprintf(search_key, sizeof(search_key), "\"%s\"", key);
+
+    const char *p = strstr(json, search_key);
+    if (!p) return -1;
+
+    p += strlen(search_key);
+    p = skip_ws(p);
+    if (*p != ':') return -1;
+    p++;
+    p = skip_ws(p);
+    if (*p != '{') return -1;
+
+    *obj_start = p;
+    int depth = 0;
+    while (*p) {
+        if (*p == '{') depth++;
+        else if (*p == '}') {
+            depth--;
+            if (depth == 0) {
+                *obj_end = p;
+                return 0;
+            }
+        }
+        p++;
+    }
+    return -1;
+}
+
+static bool is_valid_comm_char(char c) {
+    return isalnum((unsigned char)c) || c == '_' || c == '-' || c == '.';
+}
+
+typedef struct {
+    char version[16];
+    char target_name[64];
+    char policy_state[32];
+    char default_action[32];
+    char network_posture[32];
+    char cgroup_slice[256];
+    int comm_count;
+    char comms[128][MORAY_COMM_LEN];
+} moray_parsed_manifest_t;
+
+static int validate_and_parse_manifest(const char *buf, bool enforce_unreviewed, moray_parsed_manifest_t *out, char *err_buf, size_t err_sz) {
+    if (!buf || !out) return -1;
+    memset(out, 0, sizeof(*out));
+
+    /* 1. Version check */
+    if (json_get_string(buf, "version", out->version, sizeof(out->version)) < 0) {
+        snprintf(err_buf, err_sz, "Missing or invalid 'version' field");
+        return -1;
+    }
+    if (strcmp(out->version, "1.0.0") != 0) {
+        snprintf(err_buf, err_sz, "Unsupported manifest version '%s' (must be '1.0.0')", out->version);
+        return -1;
+    }
+
+    /* 2. Target Name */
+    if (json_get_string(buf, "target_name", out->target_name, sizeof(out->target_name)) < 0 || strlen(out->target_name) == 0) {
+        snprintf(err_buf, err_sz, "Missing or empty 'target_name' field");
+        return -1;
+    }
+
+    /* 3. Policy State check */
+    if (json_get_string(buf, "policy_state", out->policy_state, sizeof(out->policy_state)) < 0) {
+        /* Default to SUGGESTION if omitted */
+        strncpy(out->policy_state, "SUGGESTION", sizeof(out->policy_state) - 1);
+    }
+
+    if (strcmp(out->policy_state, "ENFORCED") != 0 &&
+        strcmp(out->policy_state, "APPROVED") != 0 &&
+        strcmp(out->policy_state, "SUGGESTION") != 0 &&
+        strcmp(out->policy_state, "PROPOSED") != 0) {
+        snprintf(err_buf, err_sz, "Invalid policy_state '%s' (must be ENFORCED, APPROVED, SUGGESTION, or PROPOSED)", out->policy_state);
+        return -1;
+    }
+
+    if ((strcmp(out->policy_state, "SUGGESTION") == 0 || strcmp(out->policy_state, "PROPOSED") == 0) && !enforce_unreviewed) {
+        snprintf(err_buf, err_sz, "Policy state is '%s'. Profiler suggestions require explicit human review or --enforce-unreviewed flag before kernel enforcement", out->policy_state);
+        return -1;
+    }
+
+    /* 4. Boundary Policy object */
+    const char *bp_start = NULL;
+    const char *bp_end = NULL;
+    if (json_get_object_bounds(buf, "boundary_policy", &bp_start, &bp_end) != 0) {
+        snprintf(err_buf, err_sz, "Missing or malformed 'boundary_policy' object");
+        return -1;
+    }
+
+    size_t bp_len = (size_t)(bp_end - bp_start + 1);
+    char *bp_buf = malloc(bp_len + 1);
+    if (!bp_buf) {
+        snprintf(err_buf, err_sz, "Memory allocation failure");
+        return -1;
+    }
+    memcpy(bp_buf, bp_start, bp_len);
+    bp_buf[bp_len] = '\0';
+
+    /* 4.1 default_action */
+    if (json_get_string(bp_buf, "default_action", out->default_action, sizeof(out->default_action)) < 0) {
+        snprintf(err_buf, err_sz, "Missing 'default_action' in boundary_policy");
+        free(bp_buf);
+        return -1;
+    }
+    if (strcmp(out->default_action, "AUTONOMOUS_STRIKE") != 0) {
+        snprintf(err_buf, err_sz, "Unsupported default_action '%s' (must strictly be 'AUTONOMOUS_STRIKE')", out->default_action);
+        free(bp_buf);
+        return -1;
+    }
+
+    /* 4.2 network_posture */
+    if (json_get_string(bp_buf, "network_posture", out->network_posture, sizeof(out->network_posture)) < 0) {
+        snprintf(err_buf, err_sz, "Missing 'network_posture' in boundary_policy");
+        free(bp_buf);
+        return -1;
+    }
+    if (strcmp(out->network_posture, "ALLOW_LOOPBACK") != 0 &&
+        strcmp(out->network_posture, "DENY_ALL_NET") != 0 &&
+        strcmp(out->network_posture, "REQUIRE_WAN") != 0) {
+        snprintf(err_buf, err_sz, "Invalid network_posture '%s' (must strictly be ALLOW_LOOPBACK, DENY_ALL_NET, or REQUIRE_WAN)", out->network_posture);
+        free(bp_buf);
+        return -1;
+    }
+
+    /* 4.3 allowed_comms */
+    const char *ac_p = strstr(bp_buf, "\"allowed_comms\"");
+    if (!ac_p) {
+        snprintf(err_buf, err_sz, "Missing 'allowed_comms' in boundary_policy");
+        free(bp_buf);
+        return -1;
+    }
+    const char *bracket = strchr(ac_p, '[');
+    const char *end_bracket = bracket ? strchr(bracket, ']') : NULL;
+    if (!bracket || !end_bracket) {
+        snprintf(err_buf, err_sz, "Malformed 'allowed_comms' array");
+        free(bp_buf);
+        return -1;
+    }
+
+    const char *cur = bracket + 1;
+    int count = 0;
+    bool has_morayd = false;
+
+    while (cur < end_bracket) {
+        const char *q1 = strchr(cur, '"');
+        if (!q1 || q1 >= end_bracket) break;
+        const char *q2 = strchr(q1 + 1, '"');
+        if (!q2 || q2 > end_bracket) break;
+
+        size_t clen = (size_t)(q2 - (q1 + 1));
+        if (clen == 0) {
+            snprintf(err_buf, err_sz, "Empty comm string in 'allowed_comms'");
+            free(bp_buf);
+            return -1;
+        }
+        if (clen >= MORAY_COMM_LEN) {
+            char too_long[64] = {0};
+            memcpy(too_long, q1 + 1, (clen < 63) ? clen : 63);
+            snprintf(err_buf, err_sz, "Executable comm '%s' exceeds 15 chars (Linux TASK_COMM_LEN limit)", too_long);
+            free(bp_buf);
+            return -1;
+        }
+
+        char comm[MORAY_COMM_LEN] = {0};
+        memcpy(comm, q1 + 1, clen);
+        comm[clen] = '\0';
+
+        /* Character validation */
+        for (size_t i = 0; i < clen; i++) {
+            if (!is_valid_comm_char(comm[i])) {
+                snprintf(err_buf, err_sz, "Executable comm '%s' contains invalid char '%c' (only [a-zA-Z0-9_.-] allowed)", comm, comm[i]);
+                free(bp_buf);
+                return -1;
+            }
+        }
+
+        if (strcmp(comm, "morayd") == 0) {
+            has_morayd = true;
+        }
+
+        if (count < 128) {
+            memcpy(out->comms[count], comm, clen);
+            out->comms[count][clen] = '\0';
+            count++;
+        }
+        cur = q2 + 1;
+    }
+
+    if (count == 0) {
+        snprintf(err_buf, err_sz, "'allowed_comms' array cannot be empty");
+        free(bp_buf);
+        return -1;
+    }
+
+    /* Auto-include morayd if missing, to prevent control plane deadlock */
+    if (!has_morayd && count < 128) {
+        memcpy(out->comms[count], "morayd", 6);
+        out->comms[count][6] = '\0';
+        count++;
+    }
+    out->comm_count = count;
+
+    /* 4.4 cgroup_slice */
+    json_get_string(bp_buf, "cgroup_slice", out->cgroup_slice, sizeof(out->cgroup_slice));
+
+    free(bp_buf);
+    return 0;
+}
+
+static int run_validate_manifest_cli(const char *manifest_path) {
+    if (!manifest_path) return 1;
+
+    FILE *f = fopen(manifest_path, "r");
+    if (!f) {
+        fprintf(stderr, "[-] FATAL: Could not open manifest file '%s': %s\n", manifest_path, strerror(errno));
+        return 1;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 1024 * 1024) {
+        fprintf(stderr, "[-] FATAL: Manifest file '%s' has invalid size (%ld bytes)\n", manifest_path, sz);
+        fclose(f);
+        return 1;
+    }
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) {
+        fclose(f);
+        return 1;
+    }
+    size_t n = fread(buf, 1, (size_t)sz, f);
+    buf[n] = '\0';
+    fclose(f);
+
+    moray_parsed_manifest_t parsed;
+    char err_buf[256] = {0};
+    if (validate_and_parse_manifest(buf, true, &parsed, err_buf, sizeof(err_buf)) != 0) {
+        fprintf(stderr, "[-] Manifest '%s' is INVALID: %s\n", manifest_path, err_buf);
+        free(buf);
+        return 1;
+    }
+
+    fprintf(stdout, "[+] Manifest '%s' is VALID:\n", manifest_path);
+    fprintf(stdout, "    - Target Name: %s\n", parsed.target_name);
+    fprintf(stdout, "    - Policy State: %s\n", parsed.policy_state);
+    fprintf(stdout, "    - Network Posture: %s\n", parsed.network_posture);
+    fprintf(stdout, "    - Default Action: %s\n", parsed.default_action);
+    fprintf(stdout, "    - Allowed Comms: %d executables\n", parsed.comm_count);
+    if (parsed.cgroup_slice[0] != '\0') {
+        fprintf(stdout, "    - Cgroup Slice: %s\n", parsed.cgroup_slice);
+    }
+    free(buf);
+    return 0;
+}
+
+/*
+ * Auto-Harden: Parses moray_boundary.json, validates schema, and seeds allowed executables and posture
+ */
+static int seed_boundary_manifest(int map_fd, int map_workload_fd, const char *manifest_path, const char *cgroup_target, bool enforce_unreviewed) {
     if (map_fd < 0 || !manifest_path) {
         return -1;
     }
@@ -552,8 +851,16 @@ static int seed_boundary_manifest(int map_fd, int map_workload_fd, const char *m
     buf[n] = '\0';
     fclose(f);
 
-    int allow_wan = (strstr(buf, "\"REQUIRE_WAN\"") != NULL);
-    int deny_all = (strstr(buf, "\"DENY_ALL_NET\"") != NULL);
+    moray_parsed_manifest_t parsed;
+    char err_buf[256] = {0};
+    if (validate_and_parse_manifest(buf, enforce_unreviewed, &parsed, err_buf, sizeof(err_buf)) != 0) {
+        fprintf(stderr, "[-] FATAL (MANIFEST_VALIDATION_ERROR): %s in '%s'\n", err_buf, manifest_path);
+        free(buf);
+        return -1;
+    }
+
+    int allow_wan = (strcmp(parsed.network_posture, "REQUIRE_WAN") == 0);
+    int deny_all = (strcmp(parsed.network_posture, "DENY_ALL_NET") == 0);
 
     char sentinel_key[MORAY_COMM_LEN] = "__moray_auto__";
     struct moray_boundary_entry sentinel_val;
@@ -568,31 +875,16 @@ static int seed_boundary_manifest(int map_fd, int map_workload_fd, const char *m
 
     __u64 target_cgroup_id = 0;
     const char *workload_source = NULL;
-    char slice_extracted[256] = {0};
 
     if (cgroup_target) {
         target_cgroup_id = resolve_cgroup_identifier(cgroup_target);
         workload_source = cgroup_target;
-    } else {
-        char *cgroup_p = strstr(buf, "\"cgroup_slice\"");
-        if (cgroup_p) {
-            char *cq1 = strchr(cgroup_p + 14, '"');
-            if (cq1) {
-                char *cq2 = strchr(cq1 + 1, '"');
-                if (cq2) {
-                    size_t slen = (size_t)(cq2 - (cq1 + 1));
-                    if (slen > 0 && slen < sizeof(slice_extracted)) {
-                        memcpy(slice_extracted, cq1 + 1, slen);
-                        slice_extracted[slen] = '\0';
-                        target_cgroup_id = resolve_cgroup_identifier(slice_extracted);
-                        workload_source = slice_extracted;
-                    }
-                }
-            }
-        }
+    } else if (parsed.cgroup_slice[0] != '\0') {
+        target_cgroup_id = resolve_cgroup_identifier(parsed.cgroup_slice);
+        workload_source = parsed.cgroup_slice;
     }
 
-    const char *posture_str = allow_wan ? "REQUIRE_WAN" : (deny_all ? "DENY_ALL_NET" : "ALLOW_LOOPBACK");
+    const char *posture_str = parsed.network_posture;
 
     if (target_cgroup_id > 0 && map_workload_fd >= 0) {
         sentinel_val.reserved = MORAY_BOUNDARY_FLAG_WORKLOAD;
@@ -610,33 +902,12 @@ static int seed_boundary_manifest(int map_fd, int map_workload_fd, const char *m
     bpf_map_update_elem(map_fd, sentinel_key, &sentinel_val, BPF_ANY);
 
     int count = 0;
-    char *p = strstr(buf, "\"allowed_comms\"");
-    if (p) {
-        char *bracket = strchr(p, '[');
-        char *end_bracket = bracket ? strchr(bracket, ']') : NULL;
-        if (bracket && end_bracket) {
-            char *cur = bracket + 1;
-            while (cur < end_bracket) {
-                char *q1 = strchr(cur, '"');
-                if (!q1 || q1 >= end_bracket) break;
-                char *q2 = strchr(q1 + 1, '"');
-                if (!q2 || q2 > end_bracket) break;
-
-                size_t len = (size_t)(q2 - (q1 + 1));
-                if (len > 0 && len < MORAY_COMM_LEN) {
-                    char comm[MORAY_COMM_LEN] = {0};
-                    memcpy(comm, q1 + 1, len);
-                    comm[len] = '\0';
-
-                    struct moray_boundary_entry entry;
-                    memset(&entry, 0, sizeof(entry));
-                    entry.perm_flags = allow_wan ? MORAY_PERM_ALL : MORAY_PERM_EXEC;
-                    bpf_map_update_elem(map_fd, comm, &entry, BPF_ANY);
-                    count++;
-                }
-                cur = q2 + 1;
-            }
-        }
+    for (int i = 0; i < parsed.comm_count; i++) {
+        struct moray_boundary_entry entry;
+        memset(&entry, 0, sizeof(entry));
+        entry.perm_flags = allow_wan ? MORAY_PERM_ALL : MORAY_PERM_EXEC;
+        bpf_map_update_elem(map_fd, parsed.comms[i], &entry, BPF_ANY);
+        count++;
     }
 
     char self_comm[MORAY_COMM_LEN] = "morayd";
@@ -646,7 +917,8 @@ static int seed_boundary_manifest(int map_fd, int map_workload_fd, const char *m
     bpf_map_update_elem(map_fd, self_comm, &self_val, BPF_ANY);
 
     free(buf);
-    fprintf(stdout, "[+] Auto-Harden: Successfully seeded %d allowed executables from %s\n", count, manifest_path);
+    fprintf(stdout, "[+] Auto-Harden: Successfully seeded %d allowed executables from %s (Policy State: %s)\n",
+            count, manifest_path, parsed.policy_state);
     if (target_cgroup_id > 0) {
         fprintf(stdout, "[+] Autonomous Ring 0 Boundary Defense ACTIVE (Workload Mode: Cgroup %llu, Network Posture: %s)\n", (unsigned long long)target_cgroup_id, posture_str);
     } else {
@@ -662,6 +934,7 @@ int main(int argc, char **argv) {
 
     bool mock_mode = false;
     bool auto_harden = false;
+    bool enforce_unreviewed = false;
     const char *manifest_path = NULL;
     const char *cgroup_target = NULL;
     const char *pin_dir = MORAY_PIN_DIR;
@@ -682,6 +955,8 @@ int main(int argc, char **argv) {
             fprintf(stdout, "  --mock [dir]     Run in mock mode using filesystem backing (for unprivileged testing)\n");
             fprintf(stdout, "  --preflight      Execute live kernel preflight checks and exit\n");
             fprintf(stdout, "  --auto-harden [file] Enable zero-config autonomous boundary defense (default: ./moray_boundary.json)\n");
+            fprintf(stdout, "  --enforce-unreviewed Enable auto-hardening for unreviewed suggestion manifests\n");
+            fprintf(stdout, "  --validate-manifest <file> Validate manifest against strict schema and exit\n");
             fprintf(stdout, "  --cgroup <dir|id> Scope autonomous boundary to specific cgroup v2 slice or ID\n");
             fprintf(stdout, "  --pin-dir <dir>  Override default BPF pin directory (default: %s)\n", MORAY_PIN_DIR);
             fprintf(stdout, "  --bpf-obj <path> Path to compiled BPF object (default: build/moray_kern.bpf.o)\n");
@@ -691,6 +966,10 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--preflight") == 0) {
             print_banner();
             return (run_kernel_preflight_checks() == 0) ? 0 : 1;
+        } else if (strcmp(argv[i], "--validate-manifest") == 0 && i + 1 < argc) {
+            return run_validate_manifest_cli(argv[++i]);
+        } else if (strcmp(argv[i], "--enforce-unreviewed") == 0) {
+            enforce_unreviewed = true;
         } else if (strcmp(argv[i], "--auto-harden") == 0) {
             auto_harden = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') {
@@ -772,6 +1051,36 @@ int main(int argc, char **argv) {
             init_mock_workload(workload_path) != 0) {
             return 1;
         }
+
+        /* Mock mode validation check for auto-harden manifest */
+        if (auto_harden) {
+            const char *cand_manifest = manifest_path ? manifest_path : "moray_boundary.json";
+            if (access(cand_manifest, R_OK) == 0) {
+                FILE *mf = fopen(cand_manifest, "r");
+                if (mf) {
+                    fseek(mf, 0, SEEK_END);
+                    long msz = ftell(mf);
+                    fseek(mf, 0, SEEK_SET);
+                    if (msz > 0 && msz <= 1024 * 1024) {
+                        char *mbuf = malloc((size_t)msz + 1);
+                        if (mbuf) {
+                            size_t mn = fread(mbuf, 1, (size_t)msz, mf);
+                            mbuf[mn] = '\0';
+                            moray_parsed_manifest_t parsed;
+                            char err_buf[256] = {0};
+                            if (validate_and_parse_manifest(mbuf, enforce_unreviewed, &parsed, err_buf, sizeof(err_buf)) != 0) {
+                                fprintf(stderr, "[-] FATAL (MANIFEST_VALIDATION_ERROR): %s in '%s'\n", err_buf, cand_manifest);
+                                free(mbuf);
+                                fclose(mf);
+                                return 1;
+                            }
+                            free(mbuf);
+                        }
+                    }
+                    fclose(mf);
+                }
+            }
+        }
     } else {
         /* Real kernel mode: run strict preflight checks */
         if (run_kernel_preflight_checks() != 0) {
@@ -798,7 +1107,11 @@ int main(int argc, char **argv) {
             int wfd = bpf_map__fd(bpf_ctx.map_workload);
             if (bfd >= 0) {
                 if (access(cand_manifest, R_OK) == 0) {
-                    seed_boundary_manifest(bfd, wfd, cand_manifest, cgroup_target);
+                    if (seed_boundary_manifest(bfd, wfd, cand_manifest, cgroup_target, enforce_unreviewed) < 0) {
+                        fprintf(stderr, "[-] FATAL: Failed to validate and seed boundary manifest '%s'. Exiting fail-closed.\n", cand_manifest);
+                        cleanup_bpf(&bpf_ctx, pin_dir);
+                        return 1;
+                    }
                 } else {
                     seed_default_boundary(bfd, wfd, cgroup_target);
                 }

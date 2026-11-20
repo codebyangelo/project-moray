@@ -13,6 +13,7 @@ import ctypes.util
 import fcntl
 import json
 import os
+import re
 import socket
 import stat
 import struct
@@ -20,6 +21,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any, TypeVar
 
 # Action Flags matching src/moray.h
@@ -81,6 +83,114 @@ DEFAULT_XDP_PIN: str = "/sys/fs/bpf/moray/xdp_drop_map"
 DEFAULT_CGROUP_PIN: str = "/sys/fs/bpf/moray/cgroup_map"
 DEFAULT_BOUNDARY_PIN: str = "/sys/fs/bpf/moray/boundary_map"
 DEFAULT_WORKLOAD_PIN: str = "/sys/fs/bpf/moray/workload_map"
+
+# Strict Manifest Schema Constants
+VALID_NETWORK_POSTURES: set[str] = {"ALLOW_LOOPBACK", "DENY_ALL_NET", "REQUIRE_WAN"}
+VALID_POLICY_STATES: set[str] = {"ENFORCED", "APPROVED", "SUGGESTION", "PROPOSED"}
+COMM_PATTERN: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9_.-]+$")
+
+
+def validate_boundary_manifest(
+    manifest_path: str | Path,
+    allow_unreviewed: bool = False,
+) -> tuple[bool, list[str]]:
+    """
+    Validate a boundary manifest against the canonical strict schema.
+    Returns (is_valid, error_list).
+    """
+    path = Path(manifest_path)
+    if not path.is_file():
+        return False, [f"Manifest file not found: {manifest_path}"]
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return False, [f"JSON parse error: {exc}"]
+
+    if not isinstance(data, dict):
+        return False, ["Root JSON value must be an object"]
+
+    errors: list[str] = []
+
+    # 1. Version check
+    version = data.get("version")
+    if version != "1.0.0":
+        errors.append(f"Field 'version' must equal '1.0.0' (got {version!r})")
+
+    # 2. Target name
+    target_name = data.get("target_name")
+    if not isinstance(target_name, str) or not target_name.strip():
+        errors.append("Field 'target_name' must be a non-empty string")
+
+    # 3. Policy state
+    policy_state = data.get("policy_state", "SUGGESTION")
+    if policy_state not in VALID_POLICY_STATES:
+        errors.append(
+            f"Field 'policy_state' must be one of {sorted(VALID_POLICY_STATES)} (got {policy_state!r})"
+        )
+    elif policy_state in ("SUGGESTION", "PROPOSED") and not allow_unreviewed:
+        errors.append(
+            f"Policy state is '{policy_state}'. Profiler suggestions require explicit human review or --allow-unreviewed before kernel enforcement."
+        )
+
+    # 4. Boundary policy object
+    bp = data.get("boundary_policy")
+    if not isinstance(bp, dict):
+        errors.append("Field 'boundary_policy' must be an object")
+    else:
+        # 4.1 default_action
+        action = bp.get("default_action")
+        if action != "AUTONOMOUS_STRIKE":
+            errors.append(
+                f"Field 'default_action' must strictly equal 'AUTONOMOUS_STRIKE' (got {action!r})"
+            )
+
+        # 4.2 network_posture
+        posture = bp.get("network_posture")
+        if posture not in VALID_NETWORK_POSTURES:
+            errors.append(
+                f"Field 'network_posture' must strictly be one of {sorted(VALID_NETWORK_POSTURES)} (got {posture!r})"
+            )
+
+        # 4.3 allowed_comms
+        comms = bp.get("allowed_comms")
+        if not isinstance(comms, list):
+            errors.append("Field 'allowed_comms' must be a list of strings")
+        elif len(comms) == 0:
+            errors.append("Field 'allowed_comms' array cannot be empty")
+        else:
+            for idx, item in enumerate(comms):
+                if not isinstance(item, str):
+                    errors.append(f"Comm at index {idx} must be a string")
+                    continue
+                if len(item) == 0:
+                    errors.append(f"Comm at index {idx} cannot be empty")
+                elif len(item) > 15:
+                    errors.append(
+                        f"Comm '{item}' at index {idx} exceeds 15 chars (Linux TASK_COMM_LEN limit)"
+                    )
+                elif not COMM_PATTERN.match(item):
+                    errors.append(
+                        f"Comm '{item}' at index {idx} contains invalid characters (must match [a-zA-Z0-9_.-])"
+                    )
+
+        # 4.4 max_strike_threshold
+        thresh = bp.get("max_strike_threshold")
+        if thresh is not None and (
+            not isinstance(thresh, int) or isinstance(thresh, bool) or thresh < 1 or thresh > 100
+        ):
+            errors.append(
+                f"Field 'max_strike_threshold' must be an integer between 1 and 100 (got {thresh!r})"
+            )
+
+        # 4.5 auto_quarantine_violations
+        aq = bp.get("auto_quarantine_violations")
+        if aq is not None and not isinstance(aq, bool):
+            errors.append("Field 'auto_quarantine_violations' must be a boolean")
+
+    return (len(errors) == 0, errors)
+
+
 DEFAULT_MOCK_QUARANTINE_FILE: str = "/tmp/moray_quarantine_mock.bin"
 DEFAULT_MOCK_XDP_FILE: str = "/tmp/moray_xdp_mock.bin"
 DEFAULT_MOCK_EVENTS_FILE: str = "/tmp/moray_events_mock.jsonl"
@@ -2308,20 +2418,23 @@ class MorayHook:
                 }
         return res
 
-    def verify_boundary_manifest(self, manifest_path: str) -> dict[str, Any]:
+    def verify_boundary_manifest(
+        self, manifest_path: str, allow_unreviewed: bool = False
+    ) -> dict[str, Any]:
         """
         Verify that the live in-kernel boundary_map strictly satisfies the given boundary manifest.
-        Asserts sentinel presence, network posture alignment, and executable whitelisting.
+        Asserts schema validity, sentinel presence, network posture alignment, and executable whitelisting.
         Raises MorayQuarantineError if any assertion fails.
         """
-        if not os.path.exists(manifest_path):
-            raise MorayQuarantineError(f"Boundary manifest not found at: {manifest_path}")
+        valid, errors = validate_boundary_manifest(manifest_path, allow_unreviewed=allow_unreviewed)
+        if not valid:
+            raise MorayQuarantineError(
+                f"Boundary manifest schema validation failed for '{manifest_path}':\n  - "
+                + "\n  - ".join(errors)
+            )
 
-        try:
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
-        except Exception as exc:
-            raise MorayQuarantineError(f"Failed to parse boundary manifest: {exc}") from exc
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
 
         boundary_policy = manifest.get("boundary_policy", {})
         network_posture = boundary_policy.get("network_posture", "ALLOW_LOOPBACK")
@@ -2651,6 +2764,17 @@ def main(prog_desc: str | None = None) -> None:
         type=str,
         metavar="MANIFEST_PATH",
         help="Verify that the live in-kernel boundary map matches the given boundary manifest",
+    )
+    parser.add_argument(
+        "--validate-manifest",
+        type=str,
+        metavar="MANIFEST_PATH",
+        help="Validate a boundary manifest against strict schema and exit",
+    )
+    parser.add_argument(
+        "--allow-unreviewed",
+        action="store_true",
+        help="Allow unreviewed SUGGESTION manifests during verification or validation",
     )
     parser.add_argument("--mock", action="store_true", help="Force mock testing mode")
     parser.add_argument("--json", action="store_true", help="Format output as structured JSON")
@@ -3162,8 +3286,45 @@ def main(prog_desc: str | None = None) -> None:
                     print(
                         f"  - '{comm}': flags=0x{info['perm_flags']:02x} ({exec_str}{sock_str}), hits={info['hit_count']}"
                     )
+        elif args.validate_manifest:
+            valid, errors = validate_boundary_manifest(
+                args.validate_manifest, allow_unreviewed=args.allow_unreviewed
+            )
+            if not valid:
+                if args.json:
+                    print(json.dumps({"valid": False, "errors": errors}, indent=2))
+                else:
+                    print(f"[-] Manifest '{args.validate_manifest}' is INVALID:", file=sys.stderr)
+                    for err in errors:
+                        print(f"    - {err}", file=sys.stderr)
+                sys.exit(1)
+            else:
+                with open(args.validate_manifest, "r", encoding="utf-8") as f:
+                    v_data = json.load(f)
+                v_bp = v_data.get("boundary_policy", {})
+                if args.json:
+                    print(
+                        json.dumps(
+                            {
+                                "valid": True,
+                                "target": v_data.get("target_name"),
+                                "policy_state": v_data.get("policy_state", "SUGGESTION"),
+                                "network_posture": v_bp.get("network_posture"),
+                                "comm_count": len(v_bp.get("allowed_comms", [])),
+                            },
+                            indent=2,
+                        )
+                    )
+                else:
+                    print(f"[+] Manifest '{args.validate_manifest}' is VALID:")
+                    print(f"    - Target: {v_data.get('target_name')}")
+                    print(f"    - Policy State: {v_data.get('policy_state', 'SUGGESTION')}")
+                    print(f"    - Network Posture: {v_bp.get('network_posture')}")
+                    print(f"    - Allowed Comms: {len(v_bp.get('allowed_comms', []))}")
         elif args.verify_boundary:
-            result = hook.verify_boundary_manifest(args.verify_boundary)
+            result = hook.verify_boundary_manifest(
+                args.verify_boundary, allow_unreviewed=args.allow_unreviewed
+            )
             if args.json:
                 print(json.dumps(result, indent=2))
             else:
