@@ -15,6 +15,9 @@ ExecStartPre=/usr/local/bin/morayd --preflight
 # Primary Daemon Service
 ExecStart=/usr/local/bin/morayd --pin-dir /sys/fs/bpf/moray
 
+# Operational Readiness Check: Confirm all 6 kernel maps are pinned and active
+ExecStartPost=/usr/local/bin/morayd --readiness --pin-dir /sys/fs/bpf/moray
+
 # Graceful termination
 KillSignal=SIGTERM
 TimeoutStopSec=10s

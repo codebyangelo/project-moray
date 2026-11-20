@@ -214,3 +214,27 @@ stat -f -c %T /sys/fs/bpf
 | :--- | :--- | :--- | :--- |
 | **Live Kernel Ring 0** | **YES** (`CONFIG_BPF_LSM=y`) | **YES** (`CAP_SYS_ADMIN` / `CAP_BPF`) | Production hosts, bare-metal agents, hardened KVM hypervisors |
 | **Mock Mode (`--mock`)** | **NO** | **NO** (Unprivileged user) | CI runners, unprivileged Docker containers, developer test harnesses |
+
+---
+
+## 5. Operational Health, Readiness & Recovery Mechanics
+
+### 5.1 Subsystem Health & Readiness Probing
+Project Moray provides native liveness and readiness probing for orchestration runtimes:
+```bash
+# Human-readable status check (exits 0 if healthy/ready, 1 if degraded/unhealthy)
+morayd --health
+
+# Structured JSON format for automated monitoring & health probes
+morayd --health --json
+
+# Production readiness probe (used by systemd ExecStartPost)
+morayd --readiness
+```
+
+### 5.2 Crash Recovery & Stale Pin Resilience
+If `morayd` terminates abruptly (`SIGKILL`, OOM killer):
+1. **LSM Link Detachment:** Kernel LSM program links (`bpf_link`) detach automatically upon file descriptor closure.
+2. **Pinned Map Persistence:** Existing pins in `/sys/fs/bpf/moray/` are retained in `bpffs`.
+3. **Automated Re-Pinning:** When `morayd` restarts, it detects existing pins (`access(pin, F_OK)`), unlinks stale inodes, re-pins fresh maps, and restores boundary enforcement without requiring a host reboot.
+4. **Emergency Break-Glass:** `morayd --clean-pins --pin-dir /sys/fs/bpf/moray` unlinks all pinned maps safely without external dependencies.

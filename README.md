@@ -1,8 +1,8 @@
 # Project Moray: OS-Level Ring 0 eBPF Containment Architecture
 
 [![CI: Build & Invariant Suite](https://github.com/codebyangelo/project-moray/actions/workflows/ci.yml/badge.svg)](https://github.com/codebyangelo/project-moray/actions/workflows/ci.yml)
-[![MicroVM: 100/100 KVM Steps](https://img.shields.io/badge/MicroVM-100%2F100%20KVM%20Steps-brightgreen.svg)](#-verification--claims-truth-matrix)
-[![Tests: 173 Passed](https://img.shields.io/badge/Tests-173%20Passed-brightgreen.svg)](#-building--running)
+[![MicroVM: 110/110 KVM Steps](https://img.shields.io/badge/MicroVM-110%2F110%20KVM%20Steps-brightgreen.svg)](#-verification--claims-truth-matrix)
+[![Tests: 183 Passed](https://img.shields.io/badge/Tests-183%20Passed-brightgreen.svg)](#-building--running)
 [![License: GPL-2.0](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](LICENSE)
 [![Kernel: eBPF LSM | XDP](https://img.shields.io/badge/Kernel-eBPF%20LSM%20%7C%20XDP-green.svg)](#-quick-architecture-overview)
 [![Python: >=3.10](https://img.shields.io/badge/Python-%3E%3D3.10-blue.svg)](#-subsystems)
@@ -78,6 +78,7 @@ In adherence to the **Provenance & Chronology Invariant ($I_6$)** and strict hum
 | | **Workload-Scoped Autonomous Boundary & Non-Interference** | **Verified (Ring 0 & Hermetic)** | Cgroup v2 workload jurisdiction (`bpf_get_current_cgroup_id()`, `bpf_get_current_ancestor_cgroup_id()`), non-interference fast-path for ungoverned workloads, child process inheritance, dynamic register/release, and dual-workload non-interference (`tests/run_live_kernel_test.sh` Steps 71–80, `tests/test_workload_boundary.py`). |
 | | **Multi-Stage Network Boundary Defense (`socket_create` & `socket_bind`)** | **Verified (Ring 0)** | 4-stage network defense: `lsm/socket_create` severs socket allocation & unconnected UDP (`sendto`) under `DENY_ALL_NET`, blocks `SOCK_RAW`/`AF_PACKET` under `ALLOW_LOOPBACK`; `lsm/socket_bind` severs wildcard (`0.0.0.0`) listener binding under `ALLOW_LOOPBACK` (`tests/run_live_kernel_test.sh` Steps 81–90). |
 | | **Manifest Schema & Fail-Closed Ingestion** | **Verified (Ring 0 & Hermetic)** | Strict JSON schema validation; unreviewed profiler suggestions (`SUGGESTION`) fail closed; explicit `--enforce-unreviewed` activation gate; comm length overflow rejection; CLI `--validate-manifest` gate (`tests/run_live_kernel_test.sh` Steps 91–100, `tests/test_manifest_schema.py`). |
+| | **Operational Health & Crash Recovery** | **Verified (Ring 0 & Hermetic)** | Subsystem health & readiness probes (`morayd --health`, `--readiness`, `--json`); stale pin recovery drill; emergency pin cleanup (`--clean-pins`); systemd `ExecStartPost` validation (`tests/run_live_kernel_test.sh` Steps 101–110, `tests/test_operational_health_recovery.py`). |
 | **Tier 2: Partially Tested / Mock-Emulated** | **Cross-Repo Octopus Audit** | **Conditional CI** | Verified when Project Octopus sibling workspace is present; safely skipped without error in standalone CI runners. |
 | **Tier 3: Claimed in Threat Model / Roadmap** | **VFS Path Unlink Protection** | **In Progress (Phase 8)**| Pinned maps protected by OS permissions (`0700` root) and `lsm/bpf`; dedicated VFS LSM hooks (`file_unlink`) scheduled for Phase 8. |
 | | **IPv6 Wire-Rate Drops** | **Roadmap** | `moray_xdp_drop_map` currently keys on `__u32` IPv4 addresses; IPv6 128-bit keying scheduled for future release. |
@@ -98,8 +99,8 @@ In adherence to the **Provenance & Chronology Invariant ($I_6$)** and strict hum
 * **`bridge/moray_profiler.py`**: Sovereign, zero-dependency workspace profiler and boundary policy synthesizer.
 * **`moray_boundary.json`**: Machine-readable boundary specification for autonomous zero-config hardening.
 * **`tests/`**: Comprehensive test suite comprising:
-  - 173 hermetic unit tests verifying layout, policy engine, XDP filter, cgroups, network policy, manifest schema, and E2E pipeline.
-  - 100 live Ring 0 kernel verification steps running inside a real KVM microVM across 13 security domains (`tests/run_live_kernel_test.sh`).
+  - 183 hermetic unit tests verifying layout, policy engine, XDP filter, cgroups, network policy, manifest schema, health probes, and E2E pipeline.
+  - 110 live Ring 0 kernel verification steps running inside a real KVM microVM across 14 security domains (`tests/run_live_kernel_test.sh`).
 
 ---
 

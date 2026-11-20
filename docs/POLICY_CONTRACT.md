@@ -166,6 +166,7 @@ Every claim in the Project Moray truth matrix maps directly to an automated veri
 | **Listener Binding Gating** | `lsm/socket_bind` | **Verified (Ring 0)** | `tests/run_live_kernel_test.sh` (Steps 88, 89) |
 | **Dual-Workload Listener Non-Interference**| Workload Map | **Verified (Ring 0)** | `tests/run_live_kernel_test.sh` (Step 90) |
 | **Manifest Schema & Fail-Closed Gate**| Schema Validator | **Verified (Ring 0 & Hermetic)** | `tests/run_live_kernel_test.sh` (Steps 91–100), `tests/test_manifest_schema.py` |
+| **Operational Health & Crash Recovery**| Health Probes / Daemon | **Verified (Ring 0 & Hermetic)** | `tests/run_live_kernel_test.sh` (Steps 101–110), `tests/test_operational_health_recovery.py` |
 | **Struct Memory Layout & Alignment**| Shared ABI | **Verified (Hermetic)** | `tests/test_struct_layout.c` (Lines 1–70) |
 | **Manifest Parsing & Auto-Harden** | Bridge & Daemon | **Verified (Hermetic)** | `tests/test_autonomous_boundary_e2e.py` |
 | **Cgroup v2 Quarantine Containment**| Manual / Lobster | **Verified (Ring 0)** | `tests/run_live_kernel_test.sh` (Steps 16–19) |
