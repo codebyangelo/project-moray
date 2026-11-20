@@ -1,8 +1,8 @@
 # Project Moray: OS-Level Ring 0 eBPF Containment Architecture
 
 [![CI: Build & Invariant Suite](https://github.com/codebyangelo/project-moray/actions/workflows/ci.yml/badge.svg)](https://github.com/codebyangelo/project-moray/actions/workflows/ci.yml)
-[![MicroVM: 70/70 KVM Steps](https://img.shields.io/badge/MicroVM-70%2F70%20KVM%20Steps-brightgreen.svg)](#-verification--claims-truth-matrix)
-[![Tests: 141 Passed](https://img.shields.io/badge/Tests-141%20Passed-brightgreen.svg)](#-building--running)
+[![MicroVM: 90/90 KVM Steps](https://img.shields.io/badge/MicroVM-90%2F90%20KVM%20Steps-brightgreen.svg)](#-verification--claims-truth-matrix)
+[![Tests: 151 Passed](https://img.shields.io/badge/Tests-151%20Passed-brightgreen.svg)](#-building--running)
 [![License: GPL-2.0](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](LICENSE)
 [![Kernel: eBPF LSM | XDP](https://img.shields.io/badge/Kernel-eBPF%20LSM%20%7C%20XDP-green.svg)](#-quick-architecture-overview)
 [![Python: >=3.10](https://img.shields.io/badge/Python-%3E%3D3.10-blue.svg)](#-subsystems)
