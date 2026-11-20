@@ -62,6 +62,15 @@ MORAY_PERM_SOCKET: int = 0x02
 MORAY_PERM_LOOPBACK: int = 0x04
 MORAY_PERM_ALL: int = 0xFF
 
+# Sentinel Flags matching src/moray.h
+MORAY_BOUNDARY_FLAG_HOSTWIDE: int = 0x00
+MORAY_BOUNDARY_FLAG_WORKLOAD: int = 0x01
+
+# Workload Governance Flags matching src/moray.h
+MORAY_WORKLOAD_NONE: int = 0x00
+MORAY_WORKLOAD_ACTIVE: int = 0x01
+MORAY_WORKLOAD_INHERIT_CHILDREN: int = 0x02
+
 # Default Pinned Paths
 DEFAULT_PIN_DIR: str = "/sys/fs/bpf/moray"
 DEFAULT_QUARANTINE_PIN: str = "/sys/fs/bpf/moray/quarantine_map"
@@ -69,11 +78,13 @@ DEFAULT_EVENTS_PIN: str = "/sys/fs/bpf/moray/events"
 DEFAULT_XDP_PIN: str = "/sys/fs/bpf/moray/xdp_drop_map"
 DEFAULT_CGROUP_PIN: str = "/sys/fs/bpf/moray/cgroup_map"
 DEFAULT_BOUNDARY_PIN: str = "/sys/fs/bpf/moray/boundary_map"
+DEFAULT_WORKLOAD_PIN: str = "/sys/fs/bpf/moray/workload_map"
 DEFAULT_MOCK_QUARANTINE_FILE: str = "/tmp/moray_quarantine_mock.bin"
 DEFAULT_MOCK_XDP_FILE: str = "/tmp/moray_xdp_mock.bin"
 DEFAULT_MOCK_EVENTS_FILE: str = "/tmp/moray_events_mock.jsonl"
 DEFAULT_MOCK_CGROUP_FILE: str = "/tmp/moray_cgroup_mock.bin"
 DEFAULT_MOCK_BOUNDARY_FILE: str = "/tmp/moray_boundary_mock.bin"
+DEFAULT_MOCK_WORKLOAD_FILE: str = "/tmp/moray_workload_mock.bin"
 
 # Resource and Safety Ceilings
 MAX_MAP_FILE_BYTES: int = 64 * 1024  # 64 KB heap ceiling clamp (Radare2 Issue #12924)
@@ -200,6 +211,23 @@ class MorayBoundaryEntry(ctypes.Structure):
 
 
 assert ctypes.sizeof(MorayBoundaryEntry) == 16, "MorayBoundaryEntry size mismatch"
+
+
+class MorayWorkloadEntry(ctypes.Structure):
+    """
+    Binary structure for moray_workload_map value.
+    Size: 24 bytes (8-byte aligned). Matches src/moray.h exactly.
+    """
+
+    _fields_ = [
+        ("posture_flags", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+        ("strike_count", ctypes.c_uint64),
+        ("hit_count", ctypes.c_uint64),
+    ]
+
+
+assert ctypes.sizeof(MorayWorkloadEntry) == 24, "MorayWorkloadEntry size mismatch"
 
 # BPF Syscall Command Codes & Flags
 BPF_MAP_CREATE: int = 0
@@ -550,6 +578,7 @@ class MorayHook:
         xdp_map_path: str = DEFAULT_XDP_PIN,
         cgroup_map_path: str = DEFAULT_CGROUP_PIN,
         boundary_map_path: str = DEFAULT_BOUNDARY_PIN,
+        workload_map_path: str = DEFAULT_WORKLOAD_PIN,
         mock_mode: bool = False,
     ) -> None:
         self.map_path: str = map_path
@@ -557,15 +586,18 @@ class MorayHook:
         self.xdp_map_path: str = xdp_map_path
         self.cgroup_map_path: str = cgroup_map_path
         self.boundary_map_path: str = boundary_map_path
+        self.workload_map_path: str = workload_map_path
         self.mock_mode: bool = mock_mode
         self._mock_table: dict[int, MorayQuarantineEntry] = {}
         self._mock_xdp_table: dict[bytes, int] = {}
         self._mock_cgroup_table: dict[int, MorayQuarantineEntry] = {}
         self._mock_boundary_table: dict[str, MorayBoundaryEntry] = {}
+        self._mock_workload_table: dict[int, MorayWorkloadEntry] = {}
         self._bpf_map_fd: int = -1
         self._bpf_xdp_fd: int = -1
         self._bpf_cgroup_fd: int = -1
         self._bpf_boundary_fd: int = -1
+        self._bpf_workload_fd: int = -1
         self._consumer: MorayTelemetryConsumer | None = None
 
         # Anti-Traversal Invariant: Reject symbolic links to prevent state redirection
@@ -589,6 +621,10 @@ class MorayHook:
             raise MorayQuarantineError(
                 f"Symlink boundary map path rejected for security (anti-traversal invariant): {self.boundary_map_path}"
             )
+        if os.path.islink(self.workload_map_path):
+            raise MorayQuarantineError(
+                f"Symlink workload map path rejected for security (anti-traversal invariant): {self.workload_map_path}"
+            )
 
         if not self.mock_mode and not os.path.exists(self.map_path):
             self.mock_mode = True
@@ -604,9 +640,12 @@ class MorayHook:
                 self.cgroup_map_path = DEFAULT_MOCK_CGROUP_FILE
             if self.boundary_map_path == DEFAULT_BOUNDARY_PIN:
                 self.boundary_map_path = DEFAULT_MOCK_BOUNDARY_FILE
+            if self.workload_map_path == DEFAULT_WORKLOAD_PIN:
+                self.workload_map_path = DEFAULT_MOCK_WORKLOAD_FILE
             self._with_lock(self._load_mock_file)
             self._with_xdp_lock(self._load_mock_xdp_file)
             self._with_cgroup_lock(self._load_mock_cgroup_file)
+            self._with_workload_lock(self._load_mock_workload_file)
         else:
             self._open_bpf_map()
             if os.path.exists(self.xdp_map_path):
@@ -615,6 +654,8 @@ class MorayHook:
                 self._open_bpf_cgroup_map()
             if os.path.exists(self.boundary_map_path):
                 self._open_bpf_boundary_map()
+            if os.path.exists(self.workload_map_path):
+                self._open_bpf_workload_map()
 
     def get_consumer(self) -> MorayTelemetryConsumer:
         """Get or initialize the telemetry consumer."""
@@ -745,6 +786,25 @@ class MorayHook:
             )
         self._bpf_boundary_fd = fd
 
+    def _open_bpf_workload_map(self) -> None:
+        """Open pinned workload map via sys_bpf(BPF_OBJ_GET)."""
+        libc = ctypes.CDLL(None, use_errno=True)
+        w_path = self.workload_map_path.encode("utf-8")
+        path_buf = ctypes.create_string_buffer(w_path)
+        attr = BpfAttrObjGet(
+            pathname=ctypes.cast(path_buf, ctypes.c_void_p).value or 0,
+            bpf_fd=0,
+            file_flags=0,
+        )
+        nr = get_bpf_syscall_nr()
+        fd = libc.syscall(nr, BPF_OBJ_GET, ctypes.byref(attr), ctypes.sizeof(attr))
+        if fd < 0:
+            err = ctypes.get_errno()
+            raise MorayQuarantineError(
+                f"Failed to access pinned workload map at '{self.workload_map_path}': {os.strerror(err)} (code {err})"
+            )
+        self._bpf_workload_fd = fd
+
     def close(self) -> None:
         if self._consumer:
             self._consumer.close()
@@ -761,6 +821,9 @@ class MorayHook:
         if self._bpf_boundary_fd >= 0:
             os.close(self._bpf_boundary_fd)
             self._bpf_boundary_fd = -1
+        if self._bpf_workload_fd >= 0:
+            os.close(self._bpf_workload_fd)
+            self._bpf_workload_fd = -1
 
     def _with_lock(self, func: Callable[[], T]) -> T:
         """Serialize map operations across processes and threads using POSIX file lock."""
@@ -798,6 +861,21 @@ class MorayHook:
             return func()
         lock_path = f"{self.cgroup_map_path}.lock"
         target_dir = os.path.dirname(self.cgroup_map_path)
+        if target_dir:
+            os.makedirs(target_dir, exist_ok=True)
+        with open(lock_path, "w") as lock_f:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            try:
+                return func()
+            finally:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+
+    def _with_workload_lock(self, func: Callable[[], T]) -> T:
+        """Serialize workload map operations across processes and threads using POSIX file lock."""
+        if not self.mock_mode or self.workload_map_path.startswith("/sys/fs/bpf"):
+            return func()
+        lock_path = f"{self.workload_map_path}.lock"
+        target_dir = os.path.dirname(self.workload_map_path)
         if target_dir:
             os.makedirs(target_dir, exist_ok=True)
         with open(lock_path, "w") as lock_f:
@@ -1847,6 +1925,285 @@ class MorayHook:
         return self._with_cgroup_lock(_do_flush)
 
     # -------------------------------------------------------------------------
+    # Milestone 2: Governed Workload Map Lifecycle & Scoping (Cgroup v2)
+    # -------------------------------------------------------------------------
+
+    def _sync_mock_workload_file(self) -> None:
+        if os.path.islink(self.workload_map_path):
+            raise MorayQuarantineError(
+                f"Symlink workload map path rejected for security: {self.workload_map_path}"
+            )
+
+        try:
+            target_dir = os.path.dirname(self.workload_map_path)
+            if target_dir:
+                os.makedirs(target_dir, exist_ok=True)
+
+            tmp_path = f"{self.workload_map_path}.tmp.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}"
+            with open(tmp_path, "wb") as f:
+                for cgroup_id, entry in self._mock_workload_table.items():
+                    f.write(struct.pack("<Q", cgroup_id))  # 8 bytes unsigned 64-bit int
+                    f.write(bytes(entry))  # 24 bytes MorayWorkloadEntry
+                f.flush()
+                os.fsync(f.fileno())
+
+            os.replace(tmp_path, self.workload_map_path)
+        except OSError as exc:
+            raise MorayQuarantineError(f"Failed to sync mock workload map: {exc}") from exc
+
+    def _load_mock_workload_file(self) -> None:
+        if not os.path.exists(self.workload_map_path):
+            return
+
+        if os.path.islink(self.workload_map_path):
+            raise MorayQuarantineError(
+                f"Symlink workload map path rejected for security: {self.workload_map_path}"
+            )
+
+        try:
+            sz = os.path.getsize(self.workload_map_path)
+            if sz > MAX_MAP_FILE_BYTES:
+                raise MorayQuarantineError(
+                    f"Workload map file size exceeds {MAX_MAP_FILE_BYTES} byte ceiling: {sz}"
+                )
+
+            with open(self.workload_map_path, "rb") as f:
+                data = f.read(MAX_MAP_FILE_BYTES + 1)
+
+            if len(data) > MAX_MAP_FILE_BYTES:
+                raise MorayQuarantineError(
+                    f"Workload map payload exceeds {MAX_MAP_FILE_BYTES} byte ceiling: {len(data)}"
+                )
+
+            entry_sz = 32  # 8 bytes cgroup_id + 24 bytes MorayWorkloadEntry
+            if len(data) % entry_sz != 0:
+                raise MorayQuarantineError(
+                    f"Corrupted workload map: size {len(data)} is not a multiple of {entry_sz}"
+                )
+
+            count = len(data) // entry_sz
+            self._mock_workload_table.clear()
+            for i in range(count):
+                chunk = data[i * entry_sz : (i + 1) * entry_sz]
+                cgroup_id = struct.unpack("<Q", chunk[:8])[0]
+                entry = MorayWorkloadEntry.from_buffer_copy(chunk[8:])
+                self._mock_workload_table[cgroup_id] = entry
+        except OSError as exc:
+            raise MorayQuarantineError(f"Failed to load mock workload map: {exc}") from exc
+
+    def _bpf_workload_update_elem(self, cgroup_id: int, entry: MorayWorkloadEntry) -> bool:
+        if self.mock_mode or self._bpf_workload_fd < 0:
+            self._mock_workload_table[cgroup_id] = entry
+            self._sync_mock_workload_file()
+            return True
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        k = ctypes.c_uint64(cgroup_id)
+        attr = BpfAttrMapElem(
+            map_fd=self._bpf_workload_fd,
+            pad0=0,
+            key=ctypes.addressof(k),
+            value=ctypes.addressof(entry),
+            flags=BPF_ANY,
+        )
+        nr = get_bpf_syscall_nr()
+        ret = libc.syscall(nr, BPF_MAP_UPDATE_ELEM, ctypes.byref(attr), ctypes.sizeof(attr))
+        if ret != 0:
+            err = ctypes.get_errno()
+            raise MorayQuarantineError(
+                f"bpf(BPF_MAP_UPDATE_ELEM) failed for workload: {os.strerror(err)}"
+            )
+        return True
+
+    def _bpf_workload_lookup_elem(self, cgroup_id: int) -> MorayWorkloadEntry | None:
+        if self.mock_mode or self._bpf_workload_fd < 0:
+            self._load_mock_workload_file()
+            return self._mock_workload_table.get(cgroup_id)
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        k = ctypes.c_uint64(cgroup_id)
+        entry = MorayWorkloadEntry()
+        attr = BpfAttrMapElem(
+            map_fd=self._bpf_workload_fd,
+            pad0=0,
+            key=ctypes.addressof(k),
+            value=ctypes.addressof(entry),
+            flags=0,
+        )
+        nr = get_bpf_syscall_nr()
+        ret = libc.syscall(nr, BPF_MAP_LOOKUP_ELEM, ctypes.byref(attr), ctypes.sizeof(attr))
+        if ret != 0:
+            err = ctypes.get_errno()
+            if err == 2:  # ENOENT
+                return None
+            raise MorayQuarantineError(
+                f"bpf(BPF_MAP_LOOKUP_ELEM) failed for workload: {os.strerror(err)}"
+            )
+        return entry
+
+    def _bpf_workload_delete_elem(self, cgroup_id: int) -> bool:
+        if self.mock_mode or self._bpf_workload_fd < 0:
+            if cgroup_id in self._mock_workload_table:
+                del self._mock_workload_table[cgroup_id]
+                self._sync_mock_workload_file()
+                return True
+            return False
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        k = ctypes.c_uint64(cgroup_id)
+        attr = BpfAttrMapElem(
+            map_fd=self._bpf_workload_fd,
+            pad0=0,
+            key=ctypes.addressof(k),
+            value=0,
+            flags=0,
+        )
+        nr = get_bpf_syscall_nr()
+        ret = libc.syscall(nr, BPF_MAP_DELETE_ELEM, ctypes.byref(attr), ctypes.sizeof(attr))
+        if ret != 0:
+            err = ctypes.get_errno()
+            if err == 2:  # ENOENT
+                return False
+            raise MorayQuarantineError(
+                f"bpf(BPF_MAP_DELETE_ELEM) failed for workload: {os.strerror(err)}"
+            )
+        return True
+
+    def register_workload(
+        self,
+        target: str | int,
+        posture: str = "ALLOW_LOOPBACK",
+        inherit_children: bool = True,
+    ) -> bool:
+        """Register a cgroup v2 hierarchy as a governed workload for autonomous boundary defense."""
+        cgroup_id = resolve_cgroup_id(target)
+        p_up = posture.upper()
+        if p_up == "REQUIRE_WAN":
+            posture_flags = MORAY_PERM_ALL
+        elif p_up == "DENY_ALL_NET":
+            posture_flags = MORAY_PERM_EXEC
+        else:
+            posture_flags = MORAY_PERM_EXEC | MORAY_PERM_LOOPBACK
+
+        flags = MORAY_WORKLOAD_ACTIVE
+        if inherit_children:
+            flags |= MORAY_WORKLOAD_INHERIT_CHILDREN
+
+        entry = MorayWorkloadEntry(
+            posture_flags=posture_flags,
+            flags=flags,
+            strike_count=0,
+            hit_count=0,
+        )
+
+        if self.mock_mode:
+
+            def _do_reg() -> bool:
+                return self._bpf_workload_update_elem(cgroup_id, entry)
+
+            return self._with_workload_lock(_do_reg)
+
+        if self._bpf_workload_fd < 0 and os.path.exists(self.workload_map_path):
+            self._open_bpf_workload_map()
+        return self._bpf_workload_update_elem(cgroup_id, entry)
+
+    def release_workload(self, target: str | int) -> bool:
+        """Release a cgroup v2 hierarchy from autonomous boundary governance."""
+        cgroup_id = resolve_cgroup_id(target)
+        if self.mock_mode:
+
+            def _do_rel() -> bool:
+                return self._bpf_workload_delete_elem(cgroup_id)
+
+            return self._with_workload_lock(_do_rel)
+
+        if self._bpf_workload_fd < 0 and os.path.exists(self.workload_map_path):
+            self._open_bpf_workload_map()
+        return self._bpf_workload_delete_elem(cgroup_id)
+
+    def is_workload_governed(self, target: str | int) -> bool:
+        """Check if a cgroup v2 hierarchy is actively governed."""
+        cgroup_id = resolve_cgroup_id(target)
+        entry = self.get_workload_entry(cgroup_id)
+        if entry is None:
+            return False
+        return bool(entry.flags & MORAY_WORKLOAD_ACTIVE)
+
+    def get_workload_entry(self, target: str | int) -> MorayWorkloadEntry | None:
+        """Retrieve raw workload entry for a cgroup."""
+        cgroup_id = resolve_cgroup_id(target)
+        if self.mock_mode:
+
+            def _do_get() -> MorayWorkloadEntry | None:
+                return self._bpf_workload_lookup_elem(cgroup_id)
+
+            return self._with_workload_lock(_do_get)
+
+        if self._bpf_workload_fd < 0 and os.path.exists(self.workload_map_path):
+            self._open_bpf_workload_map()
+        return self._bpf_workload_lookup_elem(cgroup_id)
+
+    def get_workload_status(self, target: str | int) -> dict[str, object]:
+        """Query structured boundary status for a governed workload."""
+        cgroup_id = resolve_cgroup_id(target)
+        entry = self.get_workload_entry(cgroup_id)
+        if entry is None:
+            return {
+                "cgroup_id": cgroup_id,
+                "governed": False,
+                "posture": "UNGOVERNED",
+                "posture_flags": 0,
+                "inherit_children": False,
+                "strike_count": 0,
+                "hit_count": 0,
+            }
+
+        posture_str = "ALLOW_LOOPBACK"
+        if entry.posture_flags == MORAY_PERM_ALL:
+            posture_str = "REQUIRE_WAN"
+        elif (entry.posture_flags & (MORAY_PERM_SOCKET | MORAY_PERM_LOOPBACK)) == 0:
+            posture_str = "DENY_ALL_NET"
+
+        return {
+            "cgroup_id": cgroup_id,
+            "governed": bool(entry.flags & MORAY_WORKLOAD_ACTIVE),
+            "posture": posture_str,
+            "posture_flags": entry.posture_flags,
+            "inherit_children": bool(entry.flags & MORAY_WORKLOAD_INHERIT_CHILDREN),
+            "strike_count": entry.strike_count,
+            "hit_count": entry.hit_count,
+        }
+
+    def list_workloads(self) -> list[tuple[int, MorayWorkloadEntry]]:
+        """List all active governed workloads."""
+        if self.mock_mode:
+
+            def _do_list() -> list[tuple[int, MorayWorkloadEntry]]:
+                self._load_mock_workload_file()
+                return list(self._mock_workload_table.items())
+
+            return self._with_workload_lock(_do_list)
+        return []
+
+    def flush_workloads(self, force: bool = False) -> int:
+        """Purge all entries from the governed workload map."""
+        if not force:
+            raise MorayQuarantineError(
+                "Workload flush requires explicit confirmation (force=True / --force)."
+            )
+        if not self.mock_mode:
+            return 0
+
+        def _do_flush() -> int:
+            self._load_mock_workload_file()
+            count = len(self._mock_workload_table)
+            self._mock_workload_table.clear()
+            self._sync_mock_workload_file()
+            return count
+
+        return self._with_workload_lock(_do_flush)
+
+    # -------------------------------------------------------------------------
     # Phase 7: Autonomous Boundary Map Lifecycle & Verification (Invariant I_9)
     # -------------------------------------------------------------------------
 
@@ -2242,6 +2599,44 @@ def main(prog_desc: str | None = None) -> None:
         help="Path to pinned boundary map or mock file",
     )
     parser.add_argument(
+        "--workload-map-path",
+        type=str,
+        default=DEFAULT_WORKLOAD_PIN,
+        help="Path to pinned workload map or mock file",
+    )
+    parser.add_argument(
+        "--register-workload",
+        type=str,
+        help="Register a cgroup v2 hierarchy (path or 64-bit ID) as governed workload",
+    )
+    parser.add_argument(
+        "--release-workload",
+        type=str,
+        help="Release a cgroup v2 hierarchy (path or 64-bit ID) from governed workload",
+    )
+    parser.add_argument(
+        "--workload-posture",
+        type=str,
+        default="ALLOW_LOOPBACK",
+        choices=["ALLOW_LOOPBACK", "DENY_ALL_NET", "REQUIRE_WAN"],
+        help="Network posture for governed workload",
+    )
+    parser.add_argument(
+        "--workload-status",
+        type=str,
+        help="Query structured boundary status for governed workload",
+    )
+    parser.add_argument(
+        "--list-workloads",
+        action="store_true",
+        help="List all active governed workloads",
+    )
+    parser.add_argument(
+        "--flush-workloads",
+        action="store_true",
+        help="Purge all governed workload entries (requires --force)",
+    )
+    parser.add_argument(
         "--list-boundary",
         "--dump-boundary",
         action="store_true",
@@ -2265,6 +2660,7 @@ def main(prog_desc: str | None = None) -> None:
             xdp_map_path=args.xdp_map_path,
             cgroup_map_path=args.cgroup_map_path,
             boundary_map_path=args.boundary_map_path,
+            workload_map_path=args.workload_map_path,
             mock_mode=args.mock,
         )
 
@@ -2394,6 +2790,85 @@ def main(prog_desc: str | None = None) -> None:
                 print(json.dumps({"status": "cgroups_flushed", "count": flushed}))
             else:
                 print(f"[!] BREAK-GLASS CGROUP FLUSH: Purged {flushed} quarantined cgroups.")
+        elif args.register_workload:
+            posture = args.workload_posture or "ALLOW_LOOPBACK"
+            hook.register_workload(args.register_workload, posture=posture)
+            cid = resolve_cgroup_id(args.register_workload)
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "status": "registered",
+                            "workload": args.register_workload,
+                            "cgroup_id": cid,
+                            "posture": posture,
+                        }
+                    )
+                )
+            else:
+                print(
+                    f"[+] MORAY WORKLOAD REGISTERED: Cgroup '{args.register_workload}' (ID {cid}) under autonomous boundary defense (posture: {posture})."
+                )
+        elif args.release_workload:
+            released = hook.release_workload(args.release_workload)
+            cid = resolve_cgroup_id(args.release_workload)
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "status": "released" if released else "not_found",
+                            "workload": args.release_workload,
+                            "cgroup_id": cid,
+                        }
+                    )
+                )
+            else:
+                if released:
+                    print(
+                        f"[+] MORAY WORKLOAD RELEASE: Cgroup '{args.release_workload}' (ID {cid}) released from autonomous boundary defense."
+                    )
+                else:
+                    print(f"[-] Workload '{args.release_workload}' was not actively registered.")
+        elif args.workload_status:
+            stat_res = hook.get_workload_status(args.workload_status)
+            if args.json:
+                print(json.dumps(stat_res, indent=2))
+            else:
+                print("[*] Moray Workload Boundary Status:")
+                print(f"  Target:            {args.workload_status}")
+                print(f"  Cgroup ID:         {stat_res['cgroup_id']}")
+                print(f"  Governed:          {stat_res['governed']}")
+                print(f"  Posture:           {stat_res['posture']}")
+                print(f"  Posture Flags:     {stat_res['posture_flags']:#04x}")
+                print(f"  Inherit Children:  {stat_res['inherit_children']}")
+                print(f"  Strike Count:      {stat_res['strike_count']}")
+                print(f"  Hit Count:         {stat_res['hit_count']}")
+        elif args.list_workloads:
+            workloads = hook.list_workloads()
+            if args.json:
+                out = [
+                    {
+                        "cgroup_id": cid,
+                        "flags": entry.flags,
+                        "posture_flags": entry.posture_flags,
+                        "strike_count": entry.strike_count,
+                        "hit_count": entry.hit_count,
+                    }
+                    for cid, entry in workloads
+                ]
+                print(json.dumps(out, indent=2))
+            else:
+                print(f"[*] Governed Workloads: {len(workloads)}")
+                for cid, entry in workloads:
+                    print(
+                        f"  Cgroup ID {cid} | Flags: {entry.flags:#04x} | Posture: {entry.posture_flags:#04x} | Hits: {entry.hit_count}"
+                    )
+        elif args.flush_workloads:
+            flushed = hook.flush_workloads(force=args.force)
+            if args.json:
+                print(json.dumps({"status": "workloads_flushed", "count": flushed}))
+            else:
+                print(f"[!] BREAK-GLASS WORKLOAD FLUSH: Purged {flushed} governed workloads.")
         elif args.block_exec:
             if not args.pid:
                 parser.error("--block-exec requires --pid <PID>")

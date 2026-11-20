@@ -202,6 +202,28 @@ static int init_mock_boundary(const char *path) {
     return 0;
 }
 
+/*
+ * Create and initialize the mock workload map in mock mode
+ */
+static int init_mock_workload(const char *path) {
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+        fprintf(stderr, "[-] Failed to open mock workload file '%s': %s\n", path, strerror(errno));
+        return -1;
+    }
+
+    size_t table_size = MORAY_MAX_ENTRIES * (sizeof(__u64) + sizeof(struct moray_workload_entry));
+    if (ftruncate(fd, (off_t)table_size) != 0) {
+        fprintf(stderr, "[-] Failed to preallocate mock workload table: %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    fprintf(stdout, "[+] Mock workload_map initialized at: %s (%zu bytes)\n", path, table_size);
+    close(fd);
+    return 0;
+}
+
 /* Live BPF Runtime Context */
 struct moray_bpf_context {
     struct bpf_object *obj;
@@ -214,6 +236,7 @@ struct moray_bpf_context {
     struct bpf_map *map_xdp_drop;
     struct bpf_map *map_cgroup;
     struct bpf_map *map_boundary;
+    struct bpf_map *map_workload;
     char iface[IF_NAMESIZE];
     int xdp_ifindex;
 };
@@ -224,11 +247,13 @@ static int load_and_attach_bpf(const char *bpf_obj_path, const char *pin_dir, st
     char x_pin[256];
     char c_pin[256];
     char b_pin[256];
+    char w_pin[256];
     snprintf(q_pin, sizeof(q_pin), "%s/quarantine_map", pin_dir);
     snprintf(e_pin, sizeof(e_pin), "%s/events", pin_dir);
     snprintf(x_pin, sizeof(x_pin), "%s/xdp_drop_map", pin_dir);
     snprintf(c_pin, sizeof(c_pin), "%s/cgroup_map", pin_dir);
     snprintf(b_pin, sizeof(b_pin), "%s/boundary_map", pin_dir);
+    snprintf(w_pin, sizeof(w_pin), "%s/workload_map", pin_dir);
 
     fprintf(stdout, "[*] Loading Ring 0 BPF object from: %s\n", bpf_obj_path);
     ctx->obj = bpf_object__open_file(bpf_obj_path, NULL);
@@ -351,6 +376,18 @@ static int load_and_attach_bpf(const char *bpf_obj_path, const char *pin_dir, st
         }
     }
 
+    /* Pin governed workload map (Milestone 2) */
+    ctx->map_workload = bpf_object__find_map_by_name(ctx->obj, "moray_workload_map");
+    if (ctx->map_workload) {
+        unlink(w_pin);
+        err = bpf_map__pin(ctx->map_workload, w_pin);
+        if (err) {
+            fprintf(stderr, "[-] Warning: Failed to pin workload_map to '%s': %s\n", w_pin, strerror(-err));
+        } else {
+            fprintf(stdout, "[+] Pinned workload_map to: %s\n", w_pin);
+        }
+    }
+
     return 0;
 }
 
@@ -371,29 +408,70 @@ static void cleanup_bpf(struct moray_bpf_context *ctx, const char *pin_dir) {
         char x_pin[256];
         char c_pin[256];
         char b_pin[256];
+        char w_pin[256];
         snprintf(q_pin, sizeof(q_pin), "%s/quarantine_map", pin_dir);
         snprintf(e_pin, sizeof(e_pin), "%s/events", pin_dir);
         snprintf(x_pin, sizeof(x_pin), "%s/xdp_drop_map", pin_dir);
         snprintf(c_pin, sizeof(c_pin), "%s/cgroup_map", pin_dir);
         snprintf(b_pin, sizeof(b_pin), "%s/boundary_map", pin_dir);
+        snprintf(w_pin, sizeof(w_pin), "%s/workload_map", pin_dir);
         unlink(q_pin);
         unlink(e_pin);
         unlink(x_pin);
         unlink(c_pin);
         unlink(b_pin);
+        unlink(w_pin);
     }
+}
+
+static __u64 resolve_cgroup_identifier(const char *target) {
+    if (!target || !*target) return 0;
+
+    struct stat st;
+    if (stat(target, &st) == 0 && S_ISDIR(st.st_mode)) {
+        return (__u64)st.st_ino;
+    }
+
+    char sysfs_path[512];
+    snprintf(sysfs_path, sizeof(sysfs_path), "/sys/fs/cgroup/%s", target);
+    if (stat(sysfs_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+        return (__u64)st.st_ino;
+    }
+
+    char *endptr = NULL;
+    unsigned long long val = strtoull(target, &endptr, 0);
+    if (endptr && *endptr == '\0' && val > 0) {
+        return (__u64)val;
+    }
+
+    return 0;
 }
 
 /*
  * Autonomous Boundary Seeder: Sets up default safe tools
  */
-static void seed_default_boundary(int map_fd) {
+static void seed_default_boundary(int map_fd, int map_workload_fd, const char *cgroup_target) {
     if (map_fd < 0) return;
     const char *defaults[] = {
         "morayd", "victim_worker", "bash", "sh", "python", "python3", "make", "gcc", "clang", "tcc", "cat", "ls", "rm", "mkdir", "true"
     };
     char sentinel_key[MORAY_COMM_LEN] = "__moray_auto__";
-    struct moray_boundary_entry sentinel_val = { .perm_flags = MORAY_PERM_EXEC | MORAY_PERM_LOOPBACK, .reserved = 0, .hit_count = 0 };
+    struct moray_boundary_entry sentinel_val = { .perm_flags = MORAY_PERM_EXEC | MORAY_PERM_LOOPBACK, .reserved = MORAY_BOUNDARY_FLAG_HOSTWIDE, .hit_count = 0 };
+
+    __u64 target_cgroup_id = resolve_cgroup_identifier(cgroup_target);
+    if (target_cgroup_id > 0 && map_workload_fd >= 0) {
+        sentinel_val.reserved = MORAY_BOUNDARY_FLAG_WORKLOAD;
+        struct moray_workload_entry w_entry = {
+            .posture_flags = sentinel_val.perm_flags,
+            .flags = MORAY_WORKLOAD_ACTIVE | MORAY_WORKLOAD_INHERIT_CHILDREN,
+            .strike_count = 0,
+            .hit_count = 0
+        };
+        bpf_map_update_elem(map_workload_fd, &target_cgroup_id, &w_entry, BPF_ANY);
+        fprintf(stdout, "[+] Workload Governance Active: Cgroup ID %llu (Target: '%s', Posture: ALLOW_LOOPBACK)\n",
+                (unsigned long long)target_cgroup_id, cgroup_target ? cgroup_target : "cgroup");
+    }
+
     bpf_map_update_elem(map_fd, sentinel_key, &sentinel_val, BPF_ANY);
 
     size_t count = sizeof(defaults) / sizeof(defaults[0]);
@@ -409,13 +487,17 @@ static void seed_default_boundary(int map_fd) {
     bpf_map_update_elem(map_fd, self_comm, &self_val, BPF_ANY);
 
     fprintf(stdout, "[+] Auto-Harden: Seeded %zu default executables into boundary_map.\n", count);
-    fprintf(stdout, "[+] Autonomous Ring 0 Boundary Defense ACTIVE (Network Posture: ALLOW_LOOPBACK)\n");
+    if (target_cgroup_id > 0) {
+        fprintf(stdout, "[+] Autonomous Ring 0 Boundary Defense ACTIVE (Workload Mode: Cgroup %llu, Posture: ALLOW_LOOPBACK)\n", (unsigned long long)target_cgroup_id);
+    } else {
+        fprintf(stdout, "[+] Autonomous Ring 0 Boundary Defense ACTIVE (Host-Wide Mode, Network Posture: ALLOW_LOOPBACK)\n");
+    }
 }
 
 /*
  * Auto-Harden: Parses moray_boundary.json and seeds allowed executables and posture
  */
-static int seed_boundary_manifest(int map_fd, const char *manifest_path) {
+static int seed_boundary_manifest(int map_fd, int map_workload_fd, const char *manifest_path, const char *cgroup_target) {
     if (map_fd < 0 || !manifest_path) {
         return -1;
     }
@@ -459,6 +541,48 @@ static int seed_boundary_manifest(int map_fd, const char *manifest_path) {
     } else {
         sentinel_val.perm_flags = MORAY_PERM_EXEC | MORAY_PERM_LOOPBACK;
     }
+
+    __u64 target_cgroup_id = 0;
+    const char *workload_source = NULL;
+    char slice_extracted[256] = {0};
+
+    if (cgroup_target) {
+        target_cgroup_id = resolve_cgroup_identifier(cgroup_target);
+        workload_source = cgroup_target;
+    } else {
+        char *cgroup_p = strstr(buf, "\"cgroup_slice\"");
+        if (cgroup_p) {
+            char *cq1 = strchr(cgroup_p + 14, '"');
+            if (cq1) {
+                char *cq2 = strchr(cq1 + 1, '"');
+                if (cq2) {
+                    size_t slen = (size_t)(cq2 - (cq1 + 1));
+                    if (slen > 0 && slen < sizeof(slice_extracted)) {
+                        memcpy(slice_extracted, cq1 + 1, slen);
+                        slice_extracted[slen] = '\0';
+                        target_cgroup_id = resolve_cgroup_identifier(slice_extracted);
+                        workload_source = slice_extracted;
+                    }
+                }
+            }
+        }
+    }
+
+    const char *posture_str = allow_wan ? "REQUIRE_WAN" : (deny_all ? "DENY_ALL_NET" : "ALLOW_LOOPBACK");
+
+    if (target_cgroup_id > 0 && map_workload_fd >= 0) {
+        sentinel_val.reserved = MORAY_BOUNDARY_FLAG_WORKLOAD;
+        struct moray_workload_entry w_entry;
+        memset(&w_entry, 0, sizeof(w_entry));
+        w_entry.posture_flags = sentinel_val.perm_flags;
+        w_entry.flags = MORAY_WORKLOAD_ACTIVE | MORAY_WORKLOAD_INHERIT_CHILDREN;
+        bpf_map_update_elem(map_workload_fd, &target_cgroup_id, &w_entry, BPF_ANY);
+        fprintf(stdout, "[+] Workload Governance Active: Cgroup ID %llu (Target: '%s', Posture: %s)\n",
+                (unsigned long long)target_cgroup_id, workload_source ? workload_source : "cgroup", posture_str);
+    } else {
+        sentinel_val.reserved = MORAY_BOUNDARY_FLAG_HOSTWIDE;
+    }
+
     bpf_map_update_elem(map_fd, sentinel_key, &sentinel_val, BPF_ANY);
 
     int count = 0;
@@ -498,9 +622,12 @@ static int seed_boundary_manifest(int map_fd, const char *manifest_path) {
     bpf_map_update_elem(map_fd, self_comm, &self_val, BPF_ANY);
 
     free(buf);
-    const char *posture_str = allow_wan ? "REQUIRE_WAN" : (deny_all ? "DENY_ALL_NET" : "ALLOW_LOOPBACK");
     fprintf(stdout, "[+] Auto-Harden: Successfully seeded %d allowed executables from %s\n", count, manifest_path);
-    fprintf(stdout, "[+] Autonomous Ring 0 Boundary Defense ACTIVE (Network Posture: %s)\n", posture_str);
+    if (target_cgroup_id > 0) {
+        fprintf(stdout, "[+] Autonomous Ring 0 Boundary Defense ACTIVE (Workload Mode: Cgroup %llu, Network Posture: %s)\n", (unsigned long long)target_cgroup_id, posture_str);
+    } else {
+        fprintf(stdout, "[+] Autonomous Ring 0 Boundary Defense ACTIVE (Host-Wide Mode, Network Posture: %s)\n", posture_str);
+    }
     return count;
 }
 
@@ -512,6 +639,7 @@ int main(int argc, char **argv) {
     bool mock_mode = false;
     bool auto_harden = false;
     const char *manifest_path = NULL;
+    const char *cgroup_target = NULL;
     const char *pin_dir = MORAY_PIN_DIR;
     const char *bpf_obj_path = "build/moray_kern.bpf.o";
     char quarantine_path[256];
@@ -519,6 +647,7 @@ int main(int argc, char **argv) {
     char xdp_path[256];
     char cgroup_path[256];
     char boundary_path[256];
+    char workload_path[256];
     struct moray_bpf_context bpf_ctx;
     memset(&bpf_ctx, 0, sizeof(bpf_ctx));
 
@@ -529,6 +658,7 @@ int main(int argc, char **argv) {
             fprintf(stdout, "  --mock [dir]     Run in mock mode using filesystem backing (for unprivileged testing)\n");
             fprintf(stdout, "  --preflight      Execute live kernel preflight checks and exit\n");
             fprintf(stdout, "  --auto-harden [file] Enable zero-config autonomous boundary defense (default: ./moray_boundary.json)\n");
+            fprintf(stdout, "  --cgroup <dir|id> Scope autonomous boundary to specific cgroup v2 slice or ID\n");
             fprintf(stdout, "  --pin-dir <dir>  Override default BPF pin directory (default: %s)\n", MORAY_PIN_DIR);
             fprintf(stdout, "  --bpf-obj <path> Path to compiled BPF object (default: build/moray_kern.bpf.o)\n");
             fprintf(stdout, "  --iface <dev>    Attach XDP wire filter to network interface (e.g. eth0, lo)\n");
@@ -542,6 +672,8 @@ int main(int argc, char **argv) {
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 manifest_path = argv[++i];
             }
+        } else if (strcmp(argv[i], "--cgroup") == 0 && i + 1 < argc) {
+            cgroup_target = argv[++i];
         } else if (strcmp(argv[i], "--mock") == 0) {
             mock_mode = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') {
@@ -588,11 +720,13 @@ int main(int argc, char **argv) {
     int x_len = snprintf(xdp_path, sizeof(xdp_path), "%s/xdp_drop_map", pin_dir);
     int c_len = snprintf(cgroup_path, sizeof(cgroup_path), "%s/cgroup_map", pin_dir);
     int b_len = snprintf(boundary_path, sizeof(boundary_path), "%s/boundary_map", pin_dir);
+    int w_len = snprintf(workload_path, sizeof(workload_path), "%s/workload_map", pin_dir);
     if (q_len < 0 || (size_t)q_len >= sizeof(quarantine_path) ||
         e_len < 0 || (size_t)e_len >= sizeof(events_path) ||
         x_len < 0 || (size_t)x_len >= sizeof(xdp_path) ||
         c_len < 0 || (size_t)c_len >= sizeof(cgroup_path) ||
-        b_len < 0 || (size_t)b_len >= sizeof(boundary_path)) {
+        b_len < 0 || (size_t)b_len >= sizeof(boundary_path) ||
+        w_len < 0 || (size_t)w_len >= sizeof(workload_path)) {
         fprintf(stderr, "[-] Target pin directory path exceeds buffer limit (%zu bytes)\n", sizeof(quarantine_path));
         return 1;
     }
@@ -610,7 +744,8 @@ int main(int argc, char **argv) {
         if (init_mock_quarantine(quarantine_path) != 0 ||
             init_mock_xdp(xdp_path) != 0 ||
             init_mock_cgroup(cgroup_path) != 0 ||
-            init_mock_boundary(boundary_path) != 0) {
+            init_mock_boundary(boundary_path) != 0 ||
+            init_mock_workload(workload_path) != 0) {
             return 1;
         }
     } else {
@@ -636,11 +771,12 @@ int main(int argc, char **argv) {
         if (auto_harden) {
             const char *cand_manifest = manifest_path ? manifest_path : "moray_boundary.json";
             int bfd = bpf_map__fd(bpf_ctx.map_boundary);
+            int wfd = bpf_map__fd(bpf_ctx.map_workload);
             if (bfd >= 0) {
                 if (access(cand_manifest, R_OK) == 0) {
-                    seed_boundary_manifest(bfd, cand_manifest);
+                    seed_boundary_manifest(bfd, wfd, cand_manifest, cgroup_target);
                 } else {
-                    seed_default_boundary(bfd);
+                    seed_default_boundary(bfd, wfd, cgroup_target);
                 }
             }
         }

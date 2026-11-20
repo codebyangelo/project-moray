@@ -51,6 +51,17 @@ int main(void) {
     assert(MORAY_PERM_LOOPBACK == 0x04);
     assert(MORAY_PERM_ALL == 0xFF);
 
+    /* Verify moray_workload_entry (Milestone 2) */
+    printf("[-] sizeof(struct moray_workload_entry) = %zu\n", sizeof(struct moray_workload_entry));
+    assert(sizeof(struct moray_workload_entry) == 24);
+    assert(offsetof(struct moray_workload_entry, posture_flags) == 0);
+    assert(offsetof(struct moray_workload_entry, flags) == 4);
+    assert(offsetof(struct moray_workload_entry, strike_count) == 8);
+    assert(offsetof(struct moray_workload_entry, hit_count) == 16);
+    assert(MORAY_WORKLOAD_NONE == 0x00);
+    assert(MORAY_WORKLOAD_ACTIVE == 0x01);
+    assert(MORAY_WORKLOAD_INHERIT_CHILDREN == 0x02);
+
     printf("[+] All struct layout and alignment assertions PASSED cleanly.\n");
     return 0;
 }

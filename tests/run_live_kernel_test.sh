@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0 OR BSD-2-Clause
 # Project Moray: Live Ring 0 Kernel Verification Harness
 # Executed inside KVM microVM with active BPF-LSM.
+# Supports domain-targeted execution: ./tests/run_live_kernel_test.sh [domain_id | "all"]
 
 set -euo pipefail
 
@@ -9,11 +10,93 @@ set -euo pipefail
 MORAY_HOOK="python3 bridge/moray_hook.py"
 LOBSTER_HOOK="$MORAY_HOOK"
 
-echo "=========================================================="
-echo "  PROJECT MORAY: LIVE RING 0 KERNEL VERIFICATION (KVM)    "
-echo "=========================================================="
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
 
-# 1. Verify Host Kernel LSM Stack
+# Immutable Test Fixtures
+VICTIM_BIN="$REPO_ROOT/bin/victim_worker"
+UNLISTED_BIN="/tmp/unlisted_worker"
+
+TARGET_DOMAIN="all"
+if [ $# -ge 1 ]; then
+    case "$1" in
+        --help|-h|help)
+            TARGET_DOMAIN="help"
+            ;;
+        --domain)
+            TARGET_DOMAIN="${2:-all}"
+            ;;
+        --domain=*)
+            TARGET_DOMAIN="${1#*=}"
+            ;;
+        *)
+            TARGET_DOMAIN="$1"
+            ;;
+    esac
+fi
+
+if [ "$TARGET_DOMAIN" = "help" ]; then
+    echo "Usage: $0 [domain_id | 'all']"
+    echo "Supported domain_id values:"
+    echo "  0   - Core LSM & Baseline Interceptions (Steps 5-15)"
+    echo "  1   - Real Cgroup v2 Subtree Fork Races (Steps 16-20)"
+    echo "  2   - In-Kernel Dynamic Escalation to SIGKILL (Steps 21-25)"
+    echo "  3   - Multi-Threaded SMP Concurrency (Steps 26-30)"
+    echo "  4   - Real Wire-Level Packet Drops via veth Pairs (Steps 31-35)"
+    echo "  5   - Ringbuf Saturation Stress & Continuous Drain (Steps 36-40)"
+    echo "  6   - Live SRE Disaster Recovery DR-01..DR-03 (Steps 41-46)"
+    echo "  7   - Autonomous Boundary Defense: ALLOW_LOOPBACK (Steps 47-54)"
+    echo "  8   - Autonomous Boundary Defense: DENY_ALL_NET (Steps 55-62)"
+    echo "  9   - Autonomous Boundary Defense: REQUIRE_WAN (Steps 63-70)"
+    echo "  10  - Workload-Scoped Boundary & Non-Interference (Steps 71-80)"
+    echo "  all - Complete 80-step end-to-end regression verification (default)"
+    exit 0
+fi
+
+ensure_victim_worker() {
+    if [ ! -x "$VICTIM_BIN" ] || [ "$REPO_ROOT/tests/victim_worker.c" -nt "$VICTIM_BIN" ]; then
+        echo "[*] Compiling immutable test fixture worker ($VICTIM_BIN)..."
+        mkdir -p "$REPO_ROOT/bin"
+        gcc -Wall -Wextra -O2 -std=c11 tests/victim_worker.c -o "$VICTIM_BIN"
+    fi
+}
+
+prepare_unlisted_worker() {
+    ensure_victim_worker
+    cp "$VICTIM_BIN" "$UNLISTED_BIN"
+    chmod +x "$UNLISTED_BIN"
+}
+
+cleanup_ephemeral() {
+    rm -f "$UNLISTED_BIN" /tmp/victim_*.ready /tmp/*.sock /tmp/*.json
+}
+
+stop_any_daemon() {
+    pkill -TERM -f "bin/morayd" 2>/dev/null || true
+    sleep 1
+}
+
+DAEMON_PID=""
+ensure_baseline_daemon() {
+    if [ -n "$DAEMON_PID" ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
+        return 0
+    fi
+    stop_any_daemon
+    echo "[*] Launching baseline morayd loader daemon in live Ring 0 mode..."
+    rm -rf /sys/fs/bpf/moray
+    mkdir -p /sys/fs/bpf/moray
+    ./bin/morayd --pin-dir /sys/fs/bpf/moray --bpf-obj build/moray_kern.bpf.o --iface lo > /tmp/morayd_live.log 2>&1 &
+    DAEMON_PID=$!
+    sleep 2
+    if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+        echo "[-] FATAL: morayd failed to start in baseline mode!"
+        cat /tmp/morayd_live.log
+        exit 1
+    fi
+    echo "[+] Baseline morayd is running (PID: $DAEMON_PID)."
+}
+
+run_preflight() {
 echo "[*] Step 1: Checking Ring 0 LSM stack in /sys/kernel/security/lsm..."
 if ! grep -q "bpf" /sys/kernel/security/lsm 2>/dev/null; then
     echo "[-] FATAL: 'bpf' not found in /sys/kernel/security/lsm!"
@@ -30,13 +113,12 @@ if ! grep -q "/sys/fs/bpf" /proc/mounts; then
 fi
 echo "[+] CONFIRMED: /sys/fs/bpf mounted as bpffs (magic: $(stat -f -c %T /sys/fs/bpf))"
 
-# 3. Compile victim worker binary
-echo "[*] Step 3: Compiling victim worker..."
-gcc -Wall -Wextra -O2 -std=c11 tests/victim_worker.c -o /tmp/victim_worker
-
+# 3. Ensure victim worker fixture
+echo "[*] Step 3: Verifying immutable victim worker fixture..."
+ensure_victim_worker
 # 4. Verify unquarantined baseline execution
 echo "[*] Step 4: Testing unquarantined baseline (must succeed)..."
-if /tmp/victim_worker --baseline-exec; then
+if "$VICTIM_BIN" --baseline-exec; then
     echo "[+] Baseline verified: unquarantined process executes normally."
 else
     echo "[-] FATAL: Baseline execve failed before containment!"
@@ -44,6 +126,9 @@ else
 fi
 
 # 5. Launch morayd in Live Kernel Mode
+}
+
+run_domain_0() {
 echo "[*] Step 5: Launching morayd loader daemon in live Ring 0 mode..."
 rm -rf /sys/fs/bpf/moray
 mkdir -p /sys/fs/bpf/moray
@@ -82,7 +167,7 @@ echo "[+] Verified pinned cgroup map: $(ls -l /sys/fs/bpf/moray/cgroup_map)"
 
 # 6. Test Live Syscall Interception (execve denial)
 echo "[*] Step 6: Testing live execve() interception via Ring 0 BPF-LSM..."
-/tmp/victim_worker --wait-and-exec &
+"$VICTIM_BIN" --wait-and-exec &
 VICTIM_PID=$!
 echo "[*] Victim process spawned (PID: $VICTIM_PID)"
 
@@ -109,7 +194,7 @@ echo "[+] EMPIRICAL PROOF: execve() was blocked with -EPERM by Ring 0 BPF-LSM!"
 
 # 7. Test Anti-Tamper Syscall Interception (bpf denial)
 echo "[*] Step 7: Testing live bpf() anti-tamper interception..."
-/tmp/victim_worker --wait-and-bpf &
+"$VICTIM_BIN" --wait-and-bpf &
 TAMPER_PID=$!
 echo "[*] Tamper victim spawned (PID: $TAMPER_PID)"
 
@@ -133,7 +218,7 @@ echo "[+] EMPIRICAL PROOF: sys_bpf() was blocked with -EPERM by Ring 0 BPF-LSM!"
 
 # 8. Test Active Hardware-Level Termination (SIGKILL via MORAY_ACT_KILL)
 echo "[*] Step 8: Testing live active termination (SIGKILL) via Ring 0 BPF-LSM..."
-/tmp/victim_worker --wait-and-exec &
+"$VICTIM_BIN" --wait-and-exec &
 KILL_PID=$!
 echo "[*] Termination victim spawned (PID: $KILL_PID)"
 
@@ -169,7 +254,7 @@ echo "[+] EMPIRICAL PROOF: In-kernel BPF ringbuf event was consumed and validate
 
 # 10. Test Granular Network Policy: WAN Egress Denied with -EPERM (exit code 44)
 echo "[*] Step 10: Testing granular WAN egress block via BPF-LSM..."
-/tmp/victim_worker --wait-and-connect-wan 1.1.1.1 80 &
+"$VICTIM_BIN" --wait-and-connect-wan 1.1.1.1 80 &
 WAN_PID=$!
 echo "[*] WAN victim spawned (PID: $WAN_PID)"
 
@@ -193,7 +278,7 @@ echo "[+] EMPIRICAL PROOF: WAN socket connect was blocked with -EPERM by Ring 0 
 
 # 11. Test Granular Network Policy: Loopback Allowed past BPF-LSM (exit code 45)
 echo "[*] Step 11: Testing granular loopback exemption via BPF-LSM..."
-/tmp/victim_worker --wait-and-connect-loopback 80 &
+"$VICTIM_BIN" --wait-and-connect-loopback 80 &
 LOOP_PID=$!
 echo "[*] Loopback victim spawned (PID: $LOOP_PID)"
 
@@ -216,7 +301,7 @@ echo "[+] EMPIRICAL PROOF: Loopback socket connect was permitted by Ring 0 BPF-L
 
 # 12. Test Total Network Block: Deny All Net Blocks Loopback with -EPERM (exit code 48)
 echo "[*] Step 12: Testing total network block (--deny-all-net) denying loopback with -EPERM..."
-/tmp/victim_worker --wait-and-assert-loopback-blocked 80 &
+"$VICTIM_BIN" --wait-and-assert-loopback-blocked 80 &
 DENY_PID=$!
 echo "[*] Deny-all victim spawned (PID: $DENY_PID)"
 
@@ -296,6 +381,10 @@ $LOBSTER_HOOK --status --pid 99999 --map-path /sys/fs/bpf/moray/quarantine_map -
 echo "[+] Backward-compatibility verified: secondary lobster_hook operational."
 
 # =========================================================================
+}
+
+run_domain_1() {
+    ensure_baseline_daemon
 # DOMAIN 1: Real Cgroup v2 Subtree Fork Races (Steps 16 - 20)
 # Invariant I_1 / I_7: Cgroup containment intercepts 100% of ephemeral child forks
 # =========================================================================
@@ -312,7 +401,7 @@ if [ -d "$CGROUP_RACE_DIR" ]; then
 
     echo "[*] Step 18: Executing fork-race (20 concurrent children) inside quarantined cgroup..."
     FORK_RACE_RET=0
-    /tmp/victim_worker --fork-race 20 --cgroup "$CGROUP_RACE_DIR" || FORK_RACE_RET=$?
+    "$VICTIM_BIN" --fork-race 20 --cgroup "$CGROUP_RACE_DIR" || FORK_RACE_RET=$?
 
     echo "[*] Step 19: Verifying 100% interception of fork-race children..."
     if [ "$FORK_RACE_RET" -ne 50 ]; then
@@ -323,7 +412,7 @@ if [ -d "$CGROUP_RACE_DIR" ]; then
 
     echo "[*] Step 20: Releasing cgroup and verifying baseline unquarantined fork race..."
     $MORAY_HOOK --release-cgroup "$CGROUP_RACE_DIR" --cgroup-map-path /sys/fs/bpf/moray/cgroup_map --json
-    /tmp/victim_worker --fork-race 5 --cgroup "$CGROUP_RACE_DIR" --assert-baseline
+    "$VICTIM_BIN" --fork-race 5 --cgroup "$CGROUP_RACE_DIR" --assert-baseline
     rmdir "$CGROUP_RACE_DIR" 2>/dev/null || true
     echo "[+] EMPIRICAL PROOF: Released cgroup executes fork race cleanly without LSM interference (Invariant I_2)!"
 else
@@ -334,11 +423,15 @@ else
 fi
 
 # =========================================================================
+}
+
+run_domain_2() {
+    ensure_baseline_daemon
 # DOMAIN 2: In-Kernel Escalation to SIGKILL (Steps 21 - 25)
 # Invariant I_1 / I_8: Dynamic escalation transitions Tier 1 -> Tier 3 (hits >= 5)
 # =========================================================================
 echo "[*] Step 21: Spawning victim worker for sub-threshold strike loop (4 hits)..."
-/tmp/victim_worker --multi-strike-loop 4 &
+"$VICTIM_BIN" --multi-strike-loop 4 &
 LOOP_PID1=$!
 while [ ! -f "/tmp/victim_${LOOP_PID1}.ready" ]; do sleep 0.05; done
 
@@ -356,7 +449,7 @@ fi
 echo "[+] EMPIRICAL PROOF: Worker survived 4 intercepted operations under Tier 1 containment without auto-kill!"
 
 echo "[*] Step 24: Spawning second victim worker for escalation strike loop (10 attempts)..."
-/tmp/victim_worker --multi-strike-loop 10 &
+"$VICTIM_BIN" --multi-strike-loop 10 &
 LOOP_PID2=$!
 while [ ! -f "/tmp/victim_${LOOP_PID2}.ready" ]; do sleep 0.05; done
 
@@ -372,6 +465,10 @@ fi
 echo "[+] EMPIRICAL PROOF: In-kernel dynamic escalation triggered bpf_send_signal(9) at hit 5 (exit code 137)!"
 
 # =========================================================================
+}
+
+run_domain_3() {
+    ensure_baseline_daemon
 # DOMAIN 3: Multi-Threaded SMP Concurrency Under Real BPF Maps (Steps 26 - 30)
 # Invariant I_5 / I_8: Zero race conditions, atomic lockless updates under SMP
 # =========================================================================
@@ -467,6 +564,10 @@ if len(entries) != 0:
 echo "[+] EMPIRICAL PROOF: Live BPF quarantine map remained 100% integral and race-free under SMP load!"
 
 # =========================================================================
+}
+
+run_domain_4() {
+    ensure_baseline_daemon
 # DOMAIN 4: Real Wire-Level Packet Drops via veth Pairs (Steps 31 - 35)
 # Invariant I_1 / I_4: XDP_DROP severs wire packets before socket allocation
 # =========================================================================
@@ -513,6 +614,10 @@ fi
 echo "[+] EMPIRICAL PROOF: XDP wire drop map cleanly released and network interface restored!"
 
 # =========================================================================
+}
+
+run_domain_5() {
+    ensure_baseline_daemon
 # DOMAIN 5: Ringbuf Saturation Stress & Continuous Drain (Steps 36 - 40)
 # Invariant I_4 / I_5: 64KB heap ceiling clamp, zero ringbuf corruption
 # =========================================================================
@@ -528,7 +633,7 @@ if [ -d "$CGROUP_BURST_DIR" ]; then
 
     echo "[*] Step 38: Firing 50 concurrent burst syscalls into Ring 0..."
     RET_BURST=0
-    /tmp/victim_worker --burst-syscalls 50 --no-wait --cgroup "$CGROUP_BURST_DIR" || RET_BURST=$?
+    "$VICTIM_BIN" --burst-syscalls 50 --no-wait --cgroup "$CGROUP_BURST_DIR" || RET_BURST=$?
     if [ "$RET_BURST" -ne 52 ]; then
         echo "[-] FATAL: Burst worker did not complete all 50 syscalls! Exit code: $RET_BURST (expected 52)"
         exit 1
@@ -555,6 +660,10 @@ else
 fi
 
 # =========================================================================
+}
+
+run_domain_6() {
+    ensure_baseline_daemon
 # DOMAIN 6: Live SRE Disaster Recovery (DR-01, DR-02, DR-03) (Steps 41 - 45)
 # Invariant I_1 / I_2 / I_8: Emergency flush, TTL eviction, and daemon crash recovery
 # =========================================================================
@@ -602,7 +711,7 @@ fi
 echo "[+] morayd successfully relaunched (PID: $NEW_DAEMON_PID) and re-attached to pinned maps."
 
 echo "[*] Step 45: Verifying Invariant I_2 unquarantined fast-path under relaunched daemon..."
-if /tmp/victim_worker --baseline-exec; then
+if "$VICTIM_BIN" --baseline-exec; then
     echo "[+] EMPIRICAL PROOF: Baseline unquarantined execution succeeds with zero latency (Invariant I_2)!"
 else
     echo "[-] FATAL: Baseline execution failed under relaunched daemon!"
@@ -618,14 +727,18 @@ rm -f /tmp/victim_*.ready /tmp/moray_test.sock
 sleep 1
 
 # =========================================================================
+}
+
+run_domain_7() {
+    stop_any_daemon
 # DOMAIN 7: Autonomous Boundary Defense & Autonomous Policy Claims (Steps 47 - 54)
 # Invariant I_8 / I_9: Zero-config auto-hardening, ALLOW_LOOPBACK, listed/unlisted execution,
 # hardware map verification, and granular network isolation.
 # =========================================================================
 
 echo "[*] Step 47: Generating canonical Autonomous Boundary Manifest with ALLOW_LOOPBACK..."
-gcc -Wall -Wextra -O2 -std=c11 tests/victim_worker.c -o /tmp/victim_worker
-chmod +x /tmp/victim_worker
+ensure_victim_worker
+chmod +x "$VICTIM_BIN"
 cat << 'EOF' > /tmp/moray_boundary_live.json
 {
   "version": "1.0.0",
@@ -651,7 +764,7 @@ cat << 'EOF' > /tmp/moray_boundary_live.json
       "true"
     ],
     "allowed_paths": [
-      "/tmp/victim_worker",
+      "$VICTIM_BIN",
       "/bin/true",
       "/usr/bin/true",
       "/bin/sh",
@@ -714,7 +827,7 @@ fi
 echo "[+] EMPIRICAL PROOF: In-kernel BPF boundary map verified with exact ALLOW_LOOPBACK permissions!"
 
 echo "[*] Step 50: Testing listed executable (victim_worker) execution under autonomous boundary..."
-if /tmp/victim_worker --baseline-exec; then
+if "$VICTIM_BIN" --baseline-exec; then
     echo "[+] EMPIRICAL PROOF: Listed executable executed cleanly with zero latency (Invariant I_2)!"
 else
     echo "[-] FATAL: Listed executable failed to execute under autonomous boundary!"
@@ -729,8 +842,7 @@ fi
 echo "[+] EMPIRICAL PROOF: In-kernel Ring 0 hit_count incremented for authorized execution!"
 
 echo "[*] Step 51: Testing unlisted binary (unlisted_worker) interception under autonomous boundary..."
-cp /tmp/victim_worker /tmp/unlisted_worker
-chmod +x /tmp/unlisted_worker
+prepare_unlisted_worker
 
 RET_UNLISTED=0
 /tmp/unlisted_worker --assert-unlisted-exec || RET_UNLISTED=$?
@@ -750,7 +862,7 @@ echo "[+] EMPIRICAL PROOF: Unlisted binary was autonomously quarantined in Ring 
 
 echo "[*] Step 52: Testing granular loopback socket connect under autonomous ALLOW_LOOPBACK..."
 RET_LOOPBACK=0
-/tmp/victim_worker --connect-loopback 80 || RET_LOOPBACK=$?
+"$VICTIM_BIN" --connect-loopback 80 || RET_LOOPBACK=$?
 if [ "$RET_LOOPBACK" -ne 45 ]; then
     echo "[-] FATAL: Loopback socket connect failed past LSM! Return code: $RET_LOOPBACK (expected 45)"
     exit 1
@@ -758,7 +870,7 @@ fi
 echo "[+] EMPIRICAL PROOF: Loopback socket connect permitted by Ring 0 BPF-LSM under autonomous ALLOW_LOOPBACK!"
 
 RET_UNIX=0
-/tmp/victim_worker --connect-unix /tmp/moray_auto_test.sock || RET_UNIX=$?
+"$VICTIM_BIN" --connect-unix /tmp/moray_auto_test.sock || RET_UNIX=$?
 if [ "$RET_UNIX" -ne 46 ]; then
     echo "[-] FATAL: UNIX domain socket connect failed past LSM! Return code: $RET_UNIX (expected 46)"
     exit 1
@@ -767,7 +879,7 @@ echo "[+] EMPIRICAL PROOF: AF_UNIX local IPC permitted by Ring 0 BPF-LSM under a
 
 echo "[*] Step 53: Testing autonomous WAN socket severance under ALLOW_LOOPBACK..."
 RET_WAN=0
-/tmp/victim_worker --connect-wan 1.1.1.1 80 || RET_WAN=$?
+"$VICTIM_BIN" --connect-wan 1.1.1.1 80 || RET_WAN=$?
 if [ "$RET_WAN" -ne 44 ]; then
     echo "[-] FATAL: WAN socket was NOT blocked with -EPERM under ALLOW_LOOPBACK! Return code: $RET_WAN (expected 44)"
     exit 1
@@ -787,15 +899,16 @@ kill -TERM "$AUTO_DAEMON_PID"
 rm -f /tmp/unlisted_worker /tmp/moray_boundary_live.json /tmp/moray_auto_test.sock
 sleep 1
 
+}
+
+run_domain_8() {
+    stop_any_daemon
 echo "=========================================================="
 echo "  [+] DOMAIN 8: AUTONOMOUS BOUNDARY DEFENSE (DENY_ALL_NET) "
 echo "=========================================================="
 
 echo "[*] Step 55: Generating sovereign boundary manifest (Network Posture: DENY_ALL_NET)..."
-if [ ! -x /tmp/victim_worker ]; then
-    gcc -Wall -Wextra -O2 tests/victim_worker.c -o /tmp/victim_worker
-    chmod +x /tmp/victim_worker
-fi
+ensure_victim_worker
 
 cat << 'EOF' > /tmp/moray_boundary_deny_all.json
 {
@@ -821,7 +934,7 @@ cat << 'EOF' > /tmp/moray_boundary_deny_all.json
       "true"
     ],
     "allowed_paths": [
-      "/tmp/victim_worker",
+      "$VICTIM_BIN",
       "/bin/true",
       "/usr/bin/true",
       "/bin/sh",
@@ -884,7 +997,7 @@ fi
 echo "[+] EMPIRICAL PROOF: In-kernel BPF boundary map verified with exact DENY_ALL_NET permissions!"
 
 echo "[*] Step 58: Testing listed executable (victim_worker) execution under autonomous DENY_ALL_NET..."
-if /tmp/victim_worker --baseline-exec; then
+if "$VICTIM_BIN" --baseline-exec; then
     echo "[+] EMPIRICAL PROOF: Listed executable executed cleanly with zero latency under DENY_ALL_NET (Invariant I_2)!"
 else
     echo "[-] FATAL: Listed executable failed to execute under autonomous DENY_ALL_NET!"
@@ -899,8 +1012,7 @@ fi
 echo "[+] EMPIRICAL PROOF: In-kernel Ring 0 hit_count incremented for authorized execution under DENY_ALL_NET!"
 
 echo "[*] Step 59: Testing unlisted binary (unlisted_worker) interception under autonomous DENY_ALL_NET..."
-cp /tmp/victim_worker /tmp/unlisted_worker
-chmod +x /tmp/unlisted_worker
+prepare_unlisted_worker
 
 RET_UNLISTED_DENY=0
 /tmp/unlisted_worker --assert-unlisted-exec || RET_UNLISTED_DENY=$?
@@ -920,7 +1032,7 @@ echo "[+] EMPIRICAL PROOF: Unlisted binary was autonomously quarantined in Ring 
 
 echo "[*] Step 60: Testing total local network severance (Loopback and AF_UNIX) under autonomous DENY_ALL_NET..."
 RET_DENY_LOOPBACK=0
-/tmp/victim_worker --connect-loopback 80 || RET_DENY_LOOPBACK=$?
+"$VICTIM_BIN" --connect-loopback 80 || RET_DENY_LOOPBACK=$?
 if [ "$RET_DENY_LOOPBACK" -ne 48 ]; then
     echo "[-] FATAL: Loopback socket connect was NOT blocked with -EPERM under DENY_ALL_NET! Return code: $RET_DENY_LOOPBACK (expected 48)"
     exit 1
@@ -928,7 +1040,7 @@ fi
 echo "[+] EMPIRICAL PROOF: Loopback socket connect severed with -EPERM under autonomous DENY_ALL_NET!"
 
 RET_DENY_UNIX=0
-/tmp/victim_worker --connect-unix /tmp/moray_deny_test.sock || RET_DENY_UNIX=$?
+"$VICTIM_BIN" --connect-unix /tmp/moray_deny_test.sock || RET_DENY_UNIX=$?
 if [ "$RET_DENY_UNIX" -ne 49 ]; then
     echo "[-] FATAL: UNIX domain socket connect was NOT blocked with -EPERM under DENY_ALL_NET! Return code: $RET_DENY_UNIX (expected 49)"
     exit 1
@@ -937,7 +1049,7 @@ echo "[+] EMPIRICAL PROOF: AF_UNIX local IPC severed with -EPERM under autonomou
 
 echo "[*] Step 61: Testing autonomous WAN socket severance under DENY_ALL_NET..."
 RET_DENY_WAN=0
-/tmp/victim_worker --connect-wan 1.1.1.1 80 || RET_DENY_WAN=$?
+"$VICTIM_BIN" --connect-wan 1.1.1.1 80 || RET_DENY_WAN=$?
 if [ "$RET_DENY_WAN" -ne 44 ]; then
     echo "[-] FATAL: WAN socket was NOT blocked with -EPERM under DENY_ALL_NET! Return code: $RET_DENY_WAN (expected 44)"
     exit 1
@@ -957,15 +1069,16 @@ kill -TERM "$DENY_DAEMON_PID"
 rm -f /tmp/unlisted_worker /tmp/moray_boundary_deny_all.json /tmp/moray_deny_test.sock
 sleep 1
 
+}
+
+run_domain_9() {
+    stop_any_daemon
 echo "=========================================================="
 echo "  [+] DOMAIN 9: AUTONOMOUS BOUNDARY DEFENSE (REQUIRE_WAN)  "
 echo "=========================================================="
 
 echo "[*] Step 63: Generating sovereign boundary manifest (Network Posture: REQUIRE_WAN)..."
-if [ ! -x /tmp/victim_worker ]; then
-    gcc -Wall -Wextra -O2 tests/victim_worker.c -o /tmp/victim_worker
-    chmod +x /tmp/victim_worker
-fi
+ensure_victim_worker
 
 cat << 'EOF' > /tmp/moray_boundary_require_wan.json
 {
@@ -991,7 +1104,7 @@ cat << 'EOF' > /tmp/moray_boundary_require_wan.json
       "true"
     ],
     "allowed_paths": [
-      "/tmp/victim_worker",
+      "$VICTIM_BIN",
       "/bin/true",
       "/usr/bin/true",
       "/bin/sh",
@@ -1054,7 +1167,7 @@ fi
 echo "[+] EMPIRICAL PROOF: In-kernel BPF boundary map verified with exact REQUIRE_WAN permissions!"
 
 echo "[*] Step 66: Testing listed executable (victim_worker) execution under autonomous REQUIRE_WAN..."
-if /tmp/victim_worker --baseline-exec; then
+if "$VICTIM_BIN" --baseline-exec; then
     echo "[+] EMPIRICAL PROOF: Listed executable executed cleanly with zero latency under REQUIRE_WAN (Invariant I_2)!"
 else
     echo "[-] FATAL: Listed executable failed to execute under autonomous REQUIRE_WAN!"
@@ -1069,8 +1182,7 @@ fi
 echo "[+] EMPIRICAL PROOF: In-kernel Ring 0 hit_count incremented for authorized execution under REQUIRE_WAN!"
 
 echo "[*] Step 67: Testing unlisted binary (unlisted_worker) interception under autonomous REQUIRE_WAN..."
-cp /tmp/victim_worker /tmp/unlisted_worker
-chmod +x /tmp/unlisted_worker
+prepare_unlisted_worker
 
 RET_UNLISTED_WAN=0
 /tmp/unlisted_worker --assert-unlisted-exec || RET_UNLISTED_WAN=$?
@@ -1090,7 +1202,7 @@ echo "[+] EMPIRICAL PROOF: Unlisted binary was autonomously quarantined in Ring 
 
 echo "[*] Step 68: Testing permitted WAN socket connect under autonomous REQUIRE_WAN..."
 RET_WAN_PASS=0
-/tmp/victim_worker --connect-wan 1.1.1.1 80 || RET_WAN_PASS=$?
+"$VICTIM_BIN" --connect-wan 1.1.1.1 80 || RET_WAN_PASS=$?
 if [ "$RET_WAN_PASS" -ne 43 ]; then
     echo "[-] FATAL: Outbound WAN socket connect was blocked under REQUIRE_WAN! Return code: $RET_WAN_PASS (expected 43: permitted past LSM)"
     exit 1
@@ -1099,7 +1211,7 @@ echo "[+] EMPIRICAL PROOF: Outbound WAN socket permitted by Ring 0 BPF-LSM under
 
 echo "[*] Step 69: Testing permitted loopback and AF_UNIX socket connects under autonomous REQUIRE_WAN..."
 RET_WAN_LOOP=0
-/tmp/victim_worker --connect-loopback 80 || RET_WAN_LOOP=$?
+"$VICTIM_BIN" --connect-loopback 80 || RET_WAN_LOOP=$?
 if [ "$RET_WAN_LOOP" -ne 45 ]; then
     echo "[-] FATAL: Loopback socket connect failed past LSM under REQUIRE_WAN! Return code: $RET_WAN_LOOP (expected 45)"
     exit 1
@@ -1107,7 +1219,7 @@ fi
 echo "[+] EMPIRICAL PROOF: Loopback socket connect permitted by Ring 0 BPF-LSM under autonomous REQUIRE_WAN!"
 
 RET_WAN_UNIX=0
-/tmp/victim_worker --connect-unix /tmp/moray_wan_test.sock || RET_WAN_UNIX=$?
+"$VICTIM_BIN" --connect-unix /tmp/moray_wan_test.sock || RET_WAN_UNIX=$?
 if [ "$RET_WAN_UNIX" -ne 46 ]; then
     echo "[-] FATAL: UNIX domain socket connect failed past LSM under REQUIRE_WAN! Return code: $RET_WAN_UNIX (expected 46)"
     exit 1
@@ -1116,9 +1228,309 @@ echo "[+] EMPIRICAL PROOF: AF_UNIX local IPC permitted by Ring 0 BPF-LSM under a
 
 echo "[*] Step 70: Clean teardown of autonomous REQUIRE_WAN daemon and test artifacts..."
 kill -TERM "$WAN_DAEMON_PID"
-rm -f /tmp/unlisted_worker /tmp/moray_boundary_require_wan.json /tmp/moray_wan_test.sock /tmp/victim_*
+rm -f /tmp/unlisted_worker /tmp/moray_boundary_require_wan.json /tmp/moray_wan_test.sock /tmp/victim_*.ready
 sleep 1
 
+}
+
+run_domain_10() {
+    stop_any_daemon
 echo "=========================================================="
-echo "  [+] ALL 70 LIVE RING 0 KERNEL TEST STEPS PASSED CLEANLY! "
+echo "  [+] DOMAIN 10: WORKLOAD-SCOPED BOUNDARY & NON-INTERFERENCE"
 echo "=========================================================="
+
+echo "[*] Step 71: Setting up dual cgroup v2 testing hierarchies (Workload A & Workload B)..."
+ensure_victim_worker
+CGROUP_WORKLOAD_A="/sys/fs/cgroup/moray_workload_a"
+CGROUP_WORKLOAD_B="/sys/fs/cgroup/moray_workload_b"
+mkdir -p "$CGROUP_WORKLOAD_A" "$CGROUP_WORKLOAD_B"
+CGROUP_ID_A=$(stat -c %i "$CGROUP_WORKLOAD_A")
+CGROUP_ID_B=$(stat -c %i "$CGROUP_WORKLOAD_B")
+echo "[+] Workload A (Governed): $CGROUP_WORKLOAD_A (Inode/Cgroup ID: $CGROUP_ID_A)"
+echo "[+] Workload B (Ungoverned): $CGROUP_WORKLOAD_B (Inode/Cgroup ID: $CGROUP_ID_B)"
+
+echo "[*] Step 72: Generating workload-scoped boundary manifest targeting Workload A..."
+cat << 'EOF' > /tmp/moray_boundary_workload.json
+{
+  "version": "1.0.0",
+  "target_name": "moray-workload-governed",
+  "generated_at": 1731900000,
+  "boundary_policy": {
+    "default_action": "AUTONOMOUS_STRIKE",
+    "allowed_comms": [
+      "morayd",
+      "victim_worker",
+      "bash",
+      "sh",
+      "python",
+      "python3",
+      "make",
+      "gcc",
+      "clang",
+      "cat",
+      "ls",
+      "rm",
+      "mkdir",
+      "true"
+    ],
+    "allowed_paths": [
+      "$VICTIM_BIN",
+      "/bin/true",
+      "/usr/bin/true",
+      "/bin/sh",
+      "/bin/bash"
+    ],
+    "network_posture": "ALLOW_LOOPBACK",
+    "cgroup_slice": "/sys/fs/cgroup/moray_workload_a",
+    "auto_quarantine_violations": true,
+    "max_strike_threshold": 5
+  }
+}
+EOF
+echo "[+] Workload manifest created at /tmp/moray_boundary_workload.json (Target: Workload A, Posture: ALLOW_LOOPBACK)."
+
+echo "[*] Step 73: Launching morayd in live Workload-Scoped Autonomous Mode..."
+rm -rf /sys/fs/bpf/moray
+mkdir -p /sys/fs/bpf/moray
+
+./bin/morayd --auto-harden /tmp/moray_boundary_workload.json --cgroup "$CGROUP_WORKLOAD_A" --pin-dir /sys/fs/bpf/moray --bpf-obj build/moray_kern.bpf.o --iface lo > /tmp/morayd_workload.log 2>&1 &
+WORKLOAD_DAEMON_PID=$!
+sleep 2
+
+if ! kill -0 "$WORKLOAD_DAEMON_PID" 2>/dev/null; then
+    echo "[-] FATAL: morayd failed to launch in autonomous workload mode!"
+    cat /tmp/morayd_workload.log
+    exit 1
+fi
+echo "[+] morayd running in workload-scoped mode (PID: $WORKLOAD_DAEMON_PID)."
+cat /tmp/morayd_workload.log
+
+if [ ! -e /sys/fs/bpf/moray/workload_map ]; then
+    echo "[-] FATAL: /sys/fs/bpf/moray/workload_map was not pinned!"
+    exit 1
+fi
+echo "[+] Verified pinned BPF workload map: $(ls -l /sys/fs/bpf/moray/workload_map)"
+
+echo "[*] Step 74: Verifying live in-kernel workload map and sentinel mode..."
+WORKLOAD_A_STATUS=$($MORAY_HOOK --map-path /sys/fs/bpf/moray/quarantine_map --workload-map-path /sys/fs/bpf/moray/workload_map --workload-status "$CGROUP_ID_A" --json)
+echo "$WORKLOAD_A_STATUS"
+if ! echo "$WORKLOAD_A_STATUS" | grep -q '"governed": true'; then
+    echo "[-] FATAL: Workload A is not governed in kernel workload map!"
+    exit 1
+fi
+if ! echo "$WORKLOAD_A_STATUS" | grep -q '"posture": "ALLOW_LOOPBACK"'; then
+    echo "[-] FATAL: Workload A does not have posture ALLOW_LOOPBACK!"
+    exit 1
+fi
+
+WORKLOAD_B_STATUS=$($MORAY_HOOK --map-path /sys/fs/bpf/moray/quarantine_map --workload-map-path /sys/fs/bpf/moray/workload_map --workload-status "$CGROUP_ID_B" --json)
+echo "$WORKLOAD_B_STATUS"
+if echo "$WORKLOAD_B_STATUS" | grep -q '"governed": true'; then
+    echo "[-] FATAL: Workload B should NOT be governed in kernel workload map!"
+    exit 1
+fi
+echo "[+] EMPIRICAL PROOF: In-kernel workload map correctly governs Workload A and isolates Workload B!"
+
+echo "[*] Step 75: Testing dual-workload unlisted binary (unlisted_worker) non-interference..."
+prepare_unlisted_worker
+
+# 1. Unlisted binary inside Governed Workload A -> must be severed with -EPERM (exit code 42)
+RET_UNLISTED_A=0
+/tmp/unlisted_worker --assert-unlisted-exec --cgroup "$CGROUP_WORKLOAD_A" || RET_UNLISTED_A=$?
+if [ "$RET_UNLISTED_A" -ne 42 ]; then
+    echo "[-] FATAL: Unlisted binary was NOT blocked inside governed Workload A! Return code: $RET_UNLISTED_A (expected 42)"
+    exit 1
+fi
+echo "[+] EMPIRICAL PROOF: Unlisted binary was autonomously severed with -EPERM inside governed Workload A!"
+
+# 2. Unlisted binary inside Ungoverned Workload B -> must execute cleanly with zero latency (exit code 0)
+RET_UNLISTED_B=0
+/tmp/unlisted_worker --baseline-exec --cgroup "$CGROUP_WORKLOAD_B" || RET_UNLISTED_B=$?
+if [ "$RET_UNLISTED_B" -ne 0 ]; then
+    echo "[-] FATAL: Unlisted binary was unexpectedly blocked inside ungoverned Workload B! Return code: $RET_UNLISTED_B (expected 0)"
+    exit 1
+fi
+echo "[+] EMPIRICAL PROOF: Non-interference verified! Identical unlisted binary executed cleanly inside ungoverned Workload B!"
+
+echo "[*] Step 76: Testing dual-workload WAN socket non-interference (same binary victim_worker)..."
+# 1. Inside Governed Workload A: Outbound WAN must be blocked with -EPERM (return code 44)
+RET_WAN_A=0
+"$VICTIM_BIN" --connect-wan 1.1.1.1 80 --cgroup "$CGROUP_WORKLOAD_A" || RET_WAN_A=$?
+if [ "$RET_WAN_A" -ne 44 ]; then
+    echo "[-] FATAL: WAN socket was NOT blocked inside governed Workload A! Return code: $RET_WAN_A (expected 44)"
+    exit 1
+fi
+echo "[+] EMPIRICAL PROOF: WAN socket severed with -EPERM for victim_worker inside governed Workload A!"
+
+# 2. Inside Ungoverned Workload B: Outbound WAN must bypass LSM check (return code 43)
+RET_WAN_B=0
+"$VICTIM_BIN" --connect-wan 1.1.1.1 80 --cgroup "$CGROUP_WORKLOAD_B" || RET_WAN_B=$?
+if [ "$RET_WAN_B" -ne 43 ]; then
+    echo "[-] FATAL: WAN socket was blocked inside ungoverned Workload B! Return code: $RET_WAN_B (expected 43)"
+    exit 1
+fi
+echo "[+] EMPIRICAL PROOF: Non-interference verified! WAN socket permitted for identical binary inside ungoverned Workload B!"
+
+echo "[*] Step 77: Testing dual-workload loopback socket execution under ALLOW_LOOPBACK..."
+# Inside Governed Workload A: Loopback permitted (return code 45)
+RET_LOOP_A=0
+"$VICTIM_BIN" --connect-loopback 80 --cgroup "$CGROUP_WORKLOAD_A" || RET_LOOP_A=$?
+if [ "$RET_LOOP_A" -ne 45 ]; then
+    echo "[-] FATAL: Loopback socket connect failed inside governed Workload A! Return code: $RET_LOOP_A (expected 45)"
+    exit 1
+fi
+echo "[+] EMPIRICAL PROOF: Loopback socket connect permitted inside governed Workload A!"
+
+# Inside Ungoverned Workload B: Loopback permitted (return code 45)
+RET_LOOP_B=0
+"$VICTIM_BIN" --connect-loopback 80 --cgroup "$CGROUP_WORKLOAD_B" || RET_LOOP_B=$?
+if [ "$RET_LOOP_B" -ne 45 ]; then
+    echo "[-] FATAL: Loopback socket connect failed inside ungoverned Workload B! Return code: $RET_LOOP_B (expected 45)"
+    exit 1
+fi
+echo "[+] EMPIRICAL PROOF: Loopback socket connect permitted inside ungoverned Workload B!"
+
+echo "[*] Step 78: Testing child process hierarchy inheritance (MORAY_WORKLOAD_INHERIT_CHILDREN)..."
+CGROUP_CHILD_A="$CGROUP_WORKLOAD_A/child_task"
+mkdir -p "$CGROUP_CHILD_A"
+echo "[+] Created nested child cgroup: $CGROUP_CHILD_A"
+
+RET_CHILD_WAN=0
+"$VICTIM_BIN" --connect-wan 1.1.1.1 80 --cgroup "$CGROUP_CHILD_A" || RET_CHILD_WAN=$?
+if [ "$RET_CHILD_WAN" -ne 44 ]; then
+    echo "[-] FATAL: WAN socket was NOT blocked in child cgroup! Return code: $RET_CHILD_WAN (expected 44)"
+    exit 1
+fi
+echo "[+] EMPIRICAL PROOF: Nested child cgroup inherited boundary posture from ancestor Workload A with zero re-registration!"
+
+echo "[*] Step 79: Testing dynamic zero-downtime workload lifecycle control (register & release)..."
+# Register Workload B dynamically with DENY_ALL_NET
+$MORAY_HOOK --map-path /sys/fs/bpf/moray/quarantine_map --workload-map-path /sys/fs/bpf/moray/workload_map --register-workload "$CGROUP_WORKLOAD_B" --workload-posture DENY_ALL_NET
+echo "[+] Dynamically registered Workload B under DENY_ALL_NET."
+
+RET_DYNAMIC_LOOP=0
+"$VICTIM_BIN" --connect-loopback 80 --cgroup "$CGROUP_WORKLOAD_B" || RET_DYNAMIC_LOOP=$?
+if [ "$RET_DYNAMIC_LOOP" -ne 48 ]; then
+    echo "[-] FATAL: Dynamically governed Workload B did not block loopback under DENY_ALL_NET! Return code: $RET_DYNAMIC_LOOP (expected 48)"
+    exit 1
+fi
+echo "[+] EMPIRICAL PROOF: Dynamic registration applied in Ring 0: Workload B severed from loopback!"
+
+# Release Workload B dynamically
+$MORAY_HOOK --map-path /sys/fs/bpf/moray/quarantine_map --workload-map-path /sys/fs/bpf/moray/workload_map --release-workload "$CGROUP_WORKLOAD_B"
+echo "[+] Dynamically released Workload B from governance."
+
+RET_RELEASED_LOOP=0
+"$VICTIM_BIN" --connect-loopback 80 --cgroup "$CGROUP_WORKLOAD_B" || RET_RELEASED_LOOP=$?
+if [ "$RET_RELEASED_LOOP" -ne 45 ]; then
+    echo "[-] FATAL: Released Workload B failed to permit loopback! Return code: $RET_RELEASED_LOOP (expected 45)"
+    exit 1
+fi
+echo "[+] EMPIRICAL PROOF: Dynamic release applied in Ring 0: Workload B restored to ungoverned state!"
+
+echo "[*] Step 80: Clean teardown of workload test environment and final verification..."
+kill -TERM "$WORKLOAD_DAEMON_PID"
+sleep 1
+rmdir "$CGROUP_CHILD_A" "$CGROUP_WORKLOAD_A" "$CGROUP_WORKLOAD_B" 2>/dev/null || true
+rm -f /tmp/unlisted_worker /tmp/moray_boundary_workload.json /tmp/victim_*.ready
+rm -rf /sys/fs/bpf/moray
+}
+
+# =========================================================================
+# Execution Dispatcher
+# =========================================================================
+echo "=========================================================="
+echo "  PROJECT MORAY: LIVE RING 0 KERNEL VERIFICATION (KVM)    "
+echo "  Target Domain: $TARGET_DOMAIN"
+echo "=========================================================="
+
+run_preflight
+
+case "$TARGET_DOMAIN" in
+    0|domain0|baseline)
+        run_domain_0
+        echo "=========================================================="
+        echo "  [+] DOMAIN 0 (Steps 5-15) PASSED CLEANLY!               "
+        echo "=========================================================="
+        ;;
+    1|domain1)
+        run_domain_1
+        echo "=========================================================="
+        echo "  [+] DOMAIN 1 (Steps 16-20) PASSED CLEANLY!              "
+        echo "=========================================================="
+        ;;
+    2|domain2)
+        run_domain_2
+        echo "=========================================================="
+        echo "  [+] DOMAIN 2 (Steps 21-25) PASSED CLEANLY!              "
+        echo "=========================================================="
+        ;;
+    3|domain3)
+        run_domain_3
+        echo "=========================================================="
+        echo "  [+] DOMAIN 3 (Steps 26-30) PASSED CLEANLY!              "
+        echo "=========================================================="
+        ;;
+    4|domain4)
+        run_domain_4
+        echo "=========================================================="
+        echo "  [+] DOMAIN 4 (Steps 31-35) PASSED CLEANLY!              "
+        echo "=========================================================="
+        ;;
+    5|domain5)
+        run_domain_5
+        echo "=========================================================="
+        echo "  [+] DOMAIN 5 (Steps 36-40) PASSED CLEANLY!              "
+        echo "=========================================================="
+        ;;
+    6|domain6)
+        run_domain_6
+        echo "=========================================================="
+        echo "  [+] DOMAIN 6 (Steps 41-46) PASSED CLEANLY!              "
+        echo "=========================================================="
+        ;;
+    7|domain7)
+        run_domain_7
+        echo "=========================================================="
+        echo "  [+] DOMAIN 7 (Steps 47-54) PASSED CLEANLY!              "
+        echo "=========================================================="
+        ;;
+    8|domain8)
+        run_domain_8
+        echo "=========================================================="
+        echo "  [+] DOMAIN 8 (Steps 55-62) PASSED CLEANLY!              "
+        echo "=========================================================="
+        ;;
+    9|domain9)
+        run_domain_9
+        echo "=========================================================="
+        echo "  [+] DOMAIN 9 (Steps 63-70) PASSED CLEANLY!              "
+        echo "=========================================================="
+        ;;
+    10|domain10)
+        run_domain_10
+        echo "=========================================================="
+        echo "  [+] DOMAIN 10 (Steps 71-80) PASSED CLEANLY!             "
+        echo "=========================================================="
+        ;;
+    all|ALL)
+        run_domain_0
+        run_domain_1
+        run_domain_2
+        run_domain_3
+        run_domain_4
+        run_domain_5
+        run_domain_6
+        run_domain_7
+        run_domain_8
+        run_domain_9
+        run_domain_10
+        echo "=========================================================="
+        echo "  [+] ALL 80 LIVE RING 0 KERNEL TEST STEPS PASSED CLEANLY! "
+        echo "=========================================================="
+        ;;
+    *)
+        echo "[-] FATAL: Unknown domain target: '$TARGET_DOMAIN' (expected 0-10 or 'all')"
+        exit 1
+        ;;
+esac

@@ -37,6 +37,7 @@ typedef uint32_t __be32;
 #define MORAY_XDP_DROP_PIN      "/sys/fs/bpf/moray/xdp_drop_map"
 #define MORAY_CGROUP_PIN        "/sys/fs/bpf/moray/cgroup_map"
 #define MORAY_BOUNDARY_PIN      "/sys/fs/bpf/moray/boundary_map"
+#define MORAY_WORKLOAD_PIN      "/sys/fs/bpf/moray/workload_map"
 
 /* Map Configuration Boundaries */
 #define MORAY_MAX_ENTRIES       1024
@@ -58,6 +59,15 @@ typedef uint32_t __be32;
 #define MORAY_PERM_SOCKET       0x02U  /* Allowed outbound network socket */
 #define MORAY_PERM_LOOPBACK     0x04U  /* Allowed loopback/IPC network socket */
 #define MORAY_PERM_ALL          0xFFU  /* Full execution & network permission */
+
+/* Sentinel Flags (stored in moray_boundary_entry.reserved for __moray_auto__) */
+#define MORAY_BOUNDARY_FLAG_HOSTWIDE    0x00U /* Legacy host-wide enforcement */
+#define MORAY_BOUNDARY_FLAG_WORKLOAD    0x01U /* Workload-scoped enforcement (Milestone 2) */
+
+/* Workload Governance Flags (Milestone 2 Workload Scoping) */
+#define MORAY_WORKLOAD_NONE             0x00U
+#define MORAY_WORKLOAD_ACTIVE           0x01U /* Workload boundary is actively enforced */
+#define MORAY_WORKLOAD_INHERIT_CHILDREN 0x02U /* Apply boundary to descendant/nested cgroups */
 
 /* Strike Reason Codes */
 #define MORAY_REASON_UNKNOWN          0U
@@ -125,10 +135,23 @@ struct moray_boundary_entry {
     __u64 hit_count;    /* Cumulative allowed operations counter */
 };
 
+/*
+ * Governed Workload Map Entry Value (Milestone 2)
+ * Key: __u64 (Cgroup v2 ID / inode)
+ * Total size: 24 bytes (8-byte aligned)
+ */
+struct moray_workload_entry {
+    __u32 posture_flags;  /* Active network posture flags (MORAY_PERM_*) */
+    __u32 flags;          /* Workload options (MORAY_WORKLOAD_*) */
+    __u64 strike_count;   /* Cumulative strike counter for this workload */
+    __u64 hit_count;      /* Cumulative allowed operations within this workload */
+};
+
 #if !defined(__KERNEL__) && defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(sizeof(struct moray_quarantine_entry) == 24, "moray_quarantine_entry must be 24 bytes");
 _Static_assert(sizeof(struct moray_event) == 128, "moray_event must be 128 bytes");
 _Static_assert(sizeof(struct moray_boundary_entry) == 16, "moray_boundary_entry must be 16 bytes");
+_Static_assert(sizeof(struct moray_workload_entry) == 24, "moray_workload_entry must be 24 bytes");
 #endif
 
 #endif /* _MORAY_H_ */
