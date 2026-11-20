@@ -9,6 +9,10 @@
 
 #include "moray.h"
 
+#ifndef NULL
+#define NULL ((void *)0)
+#endif
+
 #define SEC(name) __attribute__((section(name), used))
 
 /*
@@ -106,6 +110,7 @@ ____##name(unsigned long long *ctx, ##args)
 #define BPF_FUNC_send_signal         109
 #define BPF_FUNC_probe_read_kernel   113
 #define BPF_FUNC_ringbuf_output      130
+#define BPF_FUNC_get_current_ancestor_cgroup_id 138
 
 /* Helper Function Signatures */
 static void *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *)BPF_FUNC_map_lookup_elem;
@@ -117,6 +122,7 @@ static __u64 (*bpf_get_current_pid_tgid)(void) = (void *)BPF_FUNC_get_current_pi
 static __u64 (*bpf_get_current_uid_gid)(void) = (void *)BPF_FUNC_get_current_uid_gid;
 static long (*bpf_get_current_comm)(void *buf, __u32 size_of_buf) = (void *)BPF_FUNC_get_current_comm;
 static __u64 (*bpf_get_current_cgroup_id)(void) = (void *)BPF_FUNC_get_current_cgroup_id;
+static __u64 (*bpf_get_current_ancestor_cgroup_id)(int ancestor_level) = (void *)BPF_FUNC_get_current_ancestor_cgroup_id;
 static long (*bpf_send_signal)(__u32 sig) = (void *)BPF_FUNC_send_signal;
 static long (*bpf_probe_read_kernel)(void *dst, __u32 size, const void *unsafe_ptr) = (void *)BPF_FUNC_probe_read_kernel;
 static long (*bpf_ringbuf_output)(void *ringbuf, void *data, __u64 size, __u64 flags) = (void *)BPF_FUNC_ringbuf_output;

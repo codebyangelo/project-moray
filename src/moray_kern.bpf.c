@@ -60,6 +60,49 @@ struct {
     __type(value, struct moray_boundary_entry);
 } moray_boundary_map SEC(".maps");
 
+/* Governed Workload Map (Milestone 2 Workload Scoping)
+ * Key: Cgroup ID (__u64)
+ * Value: struct moray_workload_entry (24 bytes)
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MORAY_MAX_ENTRIES);
+    __type(key, __u64);
+    __type(value, struct moray_workload_entry);
+} moray_workload_map SEC(".maps");
+
+/*
+ * Invariant I_9 / Milestone 2: Look up governed workload entry for current task.
+ * 1. Checks immediate leaf cgroup ID (bpf_get_current_cgroup_id).
+ * 2. If not found and nested inheritance is enabled, checks ancestor cgroups (levels 1..4).
+ */
+static __attribute__((always_inline)) struct moray_workload_entry *lookup_workload_entry(void)
+{
+    __u64 cgroup_id = bpf_get_current_cgroup_id();
+    if (!cgroup_id) {
+        return NULL;
+    }
+
+    struct moray_workload_entry *entry = bpf_map_lookup_elem(&moray_workload_map, &cgroup_id);
+    if (entry) {
+        return entry;
+    }
+
+    /* Check ancestor cgroup levels (1 to 4) for nested hierarchy inheritance */
+    #pragma unroll
+    for (int lvl = 1; lvl <= 4; lvl++) {
+        __u64 ancestor_id = bpf_get_current_ancestor_cgroup_id(lvl);
+        if (ancestor_id) {
+            struct moray_workload_entry *anc = bpf_map_lookup_elem(&moray_workload_map, &ancestor_id);
+            if (anc && (anc->flags & MORAY_WORKLOAD_INHERIT_CHILDREN)) {
+                return anc;
+            }
+        }
+    }
+
+    return NULL;
+}
+
 /*
  * Invariant I_1: Look up quarantine entry for current task.
  * 1. Checks process TGID.
@@ -137,20 +180,35 @@ int BPF_PROG(moray_bprm_strike, struct linux_binprm *bprm)
         return -1; /* -EPERM */
     }
 
-    /* 2. Autonomous Boundary Defense (Zero-Configuration Mode) */
+    /* 2. Autonomous Boundary Defense: Workload-Scoped (Milestone 2) or Host-Wide Fallback */
+    struct moray_workload_entry *w_entry = lookup_workload_entry();
     char sentinel_key[MORAY_COMM_LEN] = "__moray_auto__";
     struct moray_boundary_entry *sentinel = bpf_map_lookup_elem(&moray_boundary_map, sentinel_key);
-    if (sentinel) {
+
+    int is_governed = 0;
+    if (w_entry) {
+        is_governed = 1;
+    } else if (sentinel && !(sentinel->reserved & MORAY_BOUNDARY_FLAG_WORKLOAD)) {
+        is_governed = 1;
+    }
+
+    if (is_governed) {
         char comm[MORAY_COMM_LEN] = {};
         bpf_get_current_comm(comm, sizeof(comm));
 
         struct moray_boundary_entry *b_entry = bpf_map_lookup_elem(&moray_boundary_map, comm);
         if (b_entry && (b_entry->perm_flags & MORAY_PERM_EXEC)) {
             __sync_fetch_and_add(&b_entry->hit_count, 1);
+            if (w_entry) {
+                __sync_fetch_and_add(&w_entry->hit_count, 1);
+            }
             return 0; /* Permitted executable: O(1) Fast-Path (Invariant I_2) */
         }
 
-        /* Unlisted binary execution: autonomous strike and quarantine */
+        /* Unlisted binary execution inside governed boundary: autonomous strike and quarantine */
+        if (w_entry) {
+            __sync_fetch_and_add(&w_entry->strike_count, 1);
+        }
         struct moray_quarantine_entry auto_strike = {};
         auto_strike.action_flags = MORAY_ACT_BLOCK_EXEC | MORAY_ACT_BLOCK_SOCKET;
         auto_strike.reason = MORAY_REASON_EXEC_VIOLATION;
@@ -226,10 +284,23 @@ int BPF_PROG(moray_socket_strike, struct socket *sock, struct sockaddr *address,
         return -1; /* -EPERM */
     }
 
-    /* 2. Autonomous Network Boundary Enforcement */
+    /* 2. Autonomous Network Boundary Enforcement (Workload-Scoped or Host-Wide Fallback) */
+    struct moray_workload_entry *w_entry = lookup_workload_entry();
     char sentinel_key[MORAY_COMM_LEN] = "__moray_auto__";
     struct moray_boundary_entry *sentinel = bpf_map_lookup_elem(&moray_boundary_map, sentinel_key);
-    if (sentinel && !(sentinel->perm_flags & MORAY_PERM_SOCKET) && address && addrlen > 0) {
+
+    __u32 effective_posture = 0;
+    int is_governed = 0;
+
+    if (w_entry) {
+        effective_posture = w_entry->posture_flags;
+        is_governed = 1;
+    } else if (sentinel && !(sentinel->reserved & MORAY_BOUNDARY_FLAG_WORKLOAD)) {
+        effective_posture = sentinel->perm_flags;
+        is_governed = 1;
+    }
+
+    if (is_governed && !(effective_posture & MORAY_PERM_SOCKET) && address && addrlen > 0) {
         char comm[MORAY_COMM_LEN] = {};
         bpf_get_current_comm(comm, sizeof(comm));
         struct moray_boundary_entry *b_entry = bpf_map_lookup_elem(&moray_boundary_map, comm);
@@ -237,11 +308,14 @@ int BPF_PROG(moray_socket_strike, struct socket *sock, struct sockaddr *address,
         /* Control plane daemon (e.g. morayd) retains MORAY_PERM_ALL / MORAY_PERM_SOCKET */
         if (b_entry && (b_entry->perm_flags & MORAY_PERM_SOCKET)) {
             __sync_fetch_and_add(&b_entry->hit_count, 1);
+            if (w_entry) {
+                __sync_fetch_and_add(&w_entry->hit_count, 1);
+            }
             return 0; /* Permitted WAN/network socket for management daemon */
         }
 
         /* Check if network posture permits loopback/IPC (ALLOW_LOOPBACK) */
-        if (sentinel->perm_flags & MORAY_PERM_LOOPBACK) {
+        if (effective_posture & MORAY_PERM_LOOPBACK) {
             sa_family_t family = 0;
             if (bpf_probe_read_kernel(&family, sizeof(family), &address->sa_family) == 0) {
                 if (family == AF_UNIX) {
@@ -271,6 +345,9 @@ int BPF_PROG(moray_socket_strike, struct socket *sock, struct sockaddr *address,
         }
 
         /* Socket severed under autonomous boundary (DENY_ALL_NET or unauthorized WAN under ALLOW_LOOPBACK) */
+        if (w_entry) {
+            __sync_fetch_and_add(&w_entry->strike_count, 1);
+        }
         bpf_printk("MORAY AUTO-STRIKE: Socket connect severed for '%s' (PID %d)\n", comm, tgid);
         emit_strike_event(pid, tgid, MORAY_ACT_BLOCK_SOCKET, -1, MORAY_HOOK_SOCKET, 1);
         return -1; /* -EPERM */

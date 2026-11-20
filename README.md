@@ -47,6 +47,7 @@ graph TD
 
 Detailed architectural blueprints and biological mapping are documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).  
 Formal security contracts and invariants are documented in [`docs/INVARIANTS.md`](docs/INVARIANTS.md).  
+Autonomous policy triad contracts and network boundary specifications are documented in [`docs/POLICY_CONTRACT.md`](docs/POLICY_CONTRACT.md).  
 Operational procedures and disaster recovery playbooks are documented in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 ---
@@ -74,6 +75,7 @@ In adherence to the **Provenance & Chronology Invariant ($I_6$)** and strict hum
 | | **Autonomous Boundary in MicroVM (`ALLOW_LOOPBACK`)** | **Verified (Ring 0)** | Real manifest loaded; pinned `boundary_map` verified; listed execution passed, unlisted binary intercepted with `-EPERM` & auto-quarantined; loopback allowed and WAN severed under `ALLOW_LOOPBACK` (`tests/run_live_kernel_test.sh` Steps 47–54). |
 | | **Autonomous Boundary in MicroVM (`DENY_ALL_NET`)** | **Verified (Ring 0)** | Real manifest loaded; pinned `boundary_map` verified; listed execution passed, unlisted binary intercepted with `-EPERM` & auto-quarantined; loopback, UNIX IPC, and WAN severed with `-EPERM` under `DENY_ALL_NET` (`tests/run_live_kernel_test.sh` Steps 55–62). |
 | | **Autonomous Boundary in MicroVM (`REQUIRE_WAN`)** | **Verified (Ring 0)** | Real manifest loaded; pinned `boundary_map` verified; listed execution passed, unlisted binary intercepted with `-EPERM` & auto-quarantined; outbound WAN, loopback, and UNIX IPC permitted under `REQUIRE_WAN` (`tests/run_live_kernel_test.sh` Steps 63–70). |
+| | **Workload-Scoped Autonomous Boundary & Non-Interference** | **Verified (Ring 0 & Hermetic)** | Cgroup v2 workload jurisdiction (`bpf_get_current_cgroup_id()`, `bpf_get_current_ancestor_cgroup_id()`), non-interference fast-path for ungoverned workloads, child process inheritance, dynamic register/release, and dual-workload non-interference (`tests/run_live_kernel_test.sh` Steps 71–80, `tests/test_workload_boundary.py`). |
 | **Tier 2: Partially Tested / Mock-Emulated** | **Cross-Repo Octopus Audit** | **Conditional CI** | Verified when Project Octopus sibling workspace is present; safely skipped without error in standalone CI runners. |
 | **Tier 3: Claimed in Threat Model / Roadmap** | **VFS Path Unlink Protection** | **In Progress (Phase 8)**| Pinned maps protected by OS permissions (`0700` root) and `lsm/bpf`; dedicated VFS LSM hooks (`file_unlink`) scheduled for Phase 8. |
 | | **IPv6 Wire-Rate Drops** | **Roadmap** | `moray_xdp_drop_map` currently keys on `__u32` IPv4 addresses; IPv6 128-bit keying scheduled for future release. |

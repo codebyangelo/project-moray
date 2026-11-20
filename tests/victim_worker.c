@@ -85,6 +85,17 @@ int main(int argc, char **argv) {
     /* Unbuffered stdout */
     setvbuf(stdout, NULL, _IONBF, 0);
 
+    const char *global_cgroup = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--cgroup") == 0 && i + 1 < argc) {
+            global_cgroup = argv[i + 1];
+            break;
+        }
+    }
+    if (global_cgroup && join_cgroup_dir(global_cgroup) != 0) {
+        return 1;
+    }
+
     if (strcmp(argv[1], "--baseline-exec") == 0) {
         char *const args[] = {"/bin/true", NULL};
         char *const envp[] = {NULL};

@@ -64,12 +64,13 @@ This document codifies the core architectural invariants of Project Moray (`mora
 * **Definition**: When `--auto-harden` is explicitly asserted on `morayd`, `moray_boundary_map` is populated with a sentinel entry (`"__moray_auto__"`) and an authorized executable whitelist. When the sentinel is present, any process invoking `execve` whose calling executable name (`comm`) is NOT registered in `moray_boundary_map` with `MORAY_PERM_EXEC` MUST be immediately severed with `-EPERM` and autonomously quarantined in Ring 0 without waiting for user-space intervention.
 * **Network Posture Semantic**:
   - `ALLOW_LOOPBACK` (`MORAY_PERM_EXEC | MORAY_PERM_LOOPBACK` on sentinel): local IPC (`AF_UNIX`) and localhost destinations (`127.0.0.0/8`, `::1`) are permitted past LSM, while external WAN egress attempts are severed with `-EPERM`.
-  - `DENY_ALL_NET` (`MORAY_PERM_EXEC` on sentinel): total network severance where all worker socket connections (external WAN, loopback, and local UNIX IPC) are severed with `-EPERM`.
-  - `REQUIRE_WAN` (`MORAY_PERM_ALL` on sentinel): outbound WAN egress permitted by default.
+  - `DENY_ALL_NET` (`MORAY_PERM_EXEC` on sentinel): total connect severance where all worker socket connections intercepted by `lsm/socket_connect` (external WAN, loopback, and local UNIX IPC) are severed with `-EPERM`.
+  - `REQUIRE_WAN` (`MORAY_PERM_ALL` on sentinel): outbound WAN egress permitted past LSM (Moray LSM does not block `connect()`; does not guarantee external routing or physical WAN reachability).
   - The control plane daemon (`morayd`) retains `MORAY_PERM_ALL` across all postures to preserve management operations and ringbuf event sinks.
+  - Complete operational contracts, jurisdiction models, and enforcement boundaries are formalized in [`docs/POLICY_CONTRACT.md`](POLICY_CONTRACT.md).
 * **Opt-In Invariant**: When `--auto-harden` is omitted, the sentinel `"__moray_auto__"` MUST NOT be inserted. In this unseeded state, unquarantined processes pass unimpeded ($O(1)$ fast path under $I_2$), preserving the fail-safe boundary and preventing unintentional system-wide execution blocking.
 * **Enforcement Point**: `moray_bprm_strike` and `moray_socket_strike` in `src/moray_kern.bpf.c` and `seed_boundary_manifest()` in `src/morayd.c`.
-* **Verification**: `tests/test_autonomous_boundary_e2e.py`, `tests/test_struct_layout.c` (verifying 16-byte boundary struct layout and permission bitmasks), and live Ring 0 KVM microVM (`tests/run_live_kernel_test.sh` Steps 47–70 verified across the complete autonomous triad).
+* **Verification**: `tests/test_autonomous_boundary_e2e.py`, `tests/test_workload_boundary.py`, `tests/test_struct_layout.c` (verifying 16-byte boundary struct and 24-byte workload struct layout and permission bitmasks), and live Ring 0 KVM microVM (`tests/run_live_kernel_test.sh` Steps 47–80 verified across the complete autonomous triad and dual-workload non-interference).
 
 ---
 
@@ -80,11 +81,11 @@ This document codifies the core architectural invariants of Project Moray (`mora
 | **$I_1$ (Syscall)** | `moray_kern.bpf.c`, `moray_hook.py` | `tests/test_lobster_hook.py`, `tests/run_live_kernel_test.sh` | Syscall blocked (`-EPERM`), bridge returns `-4` on fault. |
 | **$I_1$ (Cgroup)** | `moray_kern.bpf.c` (LSM), `moray_hook.py` | `tests/test_cgroup_containment.py`, `tests/run_live_kernel_test.sh` | Process within quarantined cgroup v2 subtree blocked with `-EPERM`. |
 | **$I_1$ (Wire)** | `moray_kern.bpf.c` (XDP), `moray_hook.py` | `tests/test_xdp_filter.py`, `tests/run_live_kernel_test.sh` | IPv4 matching `moray_xdp_drop_map` dropped via `XDP_DROP` at line rate. |
-| **$I_2$** | `moray_kern.bpf.c` | `tests/victim_worker.c` (Step 4, Step 20) | Benign execution succeeds unimpeded via $O(1)$ fast path without locks or allocations. |
+| **$I_2$** | `moray_kern.bpf.c` | `tests/victim_worker.c` (Step 4, Step 20), `tests/test_workload_boundary.py`, `tests/run_live_kernel_test.sh` (Steps 75–77) | Benign execution succeeds unimpeded via $O(1)$ fast path without locks or allocations; ungoverned workloads bypass boundary enforcement completely. |
 | **$I_3$** | `lsm/bpf` | `tests/test_anti_tamper.py`, `tests/run_live_kernel_test.sh` | Block `sys_bpf` from quarantined PID with `-EPERM`. |
 | **$I_4$** | `src/moray.h`, `tests/` | `tests/test_struct_layout.c`, `tests/test_adversarial.py` | Static assertions `sizeof(struct moray_event) == 128` and 64KB heap ceiling clamp. |
 | **$I_5$** | `src/moray.h`, `moray_hook.py` | `tests/test_struct_layout.c` | Struct offsets match Python `ctypes.sizeof()` across architectures. |
 | **$I_6$** | Repository Git history | Differential CI check | Zero synthetic commit hashes or ungrounded claims. |
 | **$I_7$** | `lsm/bpf`, `moray_hook.py` | `tests/test_anti_tamper.py`, `tests/run_live_kernel_test.sh` | Quarantined PID calling `sys_bpf` receives `-EPERM`; `--report-tamper` asserts strike. |
 | **$I_8$** | `lsm/socket_connect` | `tests/test_network_policy.py`, `tests/run_live_kernel_test.sh` | External WAN blocked with `-EPERM`; loopback/IPC allowed when flag asserted. |
-| **$I_9$** | `moray_boundary_map`, `morayd.c` | `tests/test_autonomous_boundary_e2e.py`, `tests/run_live_kernel_test.sh` (Steps 47–70 verified across complete autonomous triad) | Real manifest loaded; unlisted binary blocked with `-EPERM`; authorized binaries pass; loopback allowed and WAN blocked under `ALLOW_LOOPBACK`; all network severed under `DENY_ALL_NET`; WAN permitted under `REQUIRE_WAN`. |
+| **$I_9$** | `moray_boundary_map`, `moray_workload_map`, `morayd.c` | `tests/test_autonomous_boundary_e2e.py`, `tests/test_workload_boundary.py`, `tests/run_live_kernel_test.sh` (Steps 47–80 verified across complete autonomous triad and dual-workload non-interference) | Real manifest loaded; unlisted binary blocked with `-EPERM`; authorized binaries pass; loopback allowed and WAN blocked under `ALLOW_LOOPBACK`; all network severed under `DENY_ALL_NET`; WAN permitted under `REQUIRE_WAN`; ungoverned workloads experience zero interference. |
