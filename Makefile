@@ -22,14 +22,16 @@ BPF_SRC = $(SRC_DIR)/moray_kern.bpf.c
 BPF_OBJ = $(BUILD_DIR)/moray_kern.bpf.o
 DAEMON_SRC = $(SRC_DIR)/morayd.c
 DAEMON_BIN = $(BIN_DIR)/morayd
+VICTIM_SRC = $(TESTS_DIR)/victim_worker.c
+VICTIM_BIN = $(BIN_DIR)/victim_worker
 TEST_STRUCT_SRC = $(TESTS_DIR)/test_struct_layout.c
 TEST_STRUCT_BIN = $(BUILD_DIR)/test_struct_layout
 
-.PHONY: all clean test bpf daemon dirs build verify
+.PHONY: all clean test bpf daemon dirs build verify victim_worker
 
-all: dirs bpf daemon test
+all: dirs bpf daemon victim_worker test
 
-build: dirs bpf daemon
+build: dirs bpf daemon victim_worker
 
 verify: clean all
 	@echo "[*] Running comprehensive verification pipeline..."
@@ -51,6 +53,12 @@ daemon: dirs $(DAEMON_BIN)
 $(DAEMON_BIN): $(DAEMON_SRC) $(SRC_DIR)/moray.h
 	@echo "[*] Compiling morayd loader daemon: $< -> $@"
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $< $(LDLIBS) -o $@
+
+victim_worker: dirs $(VICTIM_BIN)
+
+$(VICTIM_BIN): $(VICTIM_SRC)
+	@echo "[*] Compiling test fixture worker: $< -> $@"
+	$(CC) $(CFLAGS) $< -o $@
 
 test: dirs $(TEST_STRUCT_BIN)
 	@echo "[*] Executing struct alignment & layout tests..."
