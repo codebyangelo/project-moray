@@ -225,6 +225,20 @@ static int init_mock_workload(const char *path) {
     return 0;
 }
 
+/*
+ * Create and initialize the mock events ringbuf in mock mode
+ */
+static int init_mock_events(const char *path) {
+    int fd = open(path, O_RDWR | O_CREAT, 0600);
+    if (fd < 0) {
+        fprintf(stderr, "[-] Failed to open mock events file '%s': %s\n", path, strerror(errno));
+        return -1;
+    }
+    close(fd);
+    fprintf(stdout, "[+] Mock events ringbuf initialized at: %s\n", path);
+    return 0;
+}
+
 /* Live BPF Runtime Context */
 struct moray_bpf_context {
     struct bpf_object *obj;
@@ -342,6 +356,9 @@ static int load_and_attach_bpf(const char *bpf_obj_path, const char *pin_dir, st
     /* Pin quarantine map */
     ctx->map_quarantine = bpf_object__find_map_by_name(ctx->obj, "moray_quarantine_map");
     if (ctx->map_quarantine) {
+        if (access(q_pin, F_OK) == 0) {
+            fprintf(stdout, "[*] Stale pin detected for '%s'; unlinking and recovering fresh pin...\n", q_pin);
+        }
         unlink(q_pin);
         err = bpf_map__pin(ctx->map_quarantine, q_pin);
         if (err) {
@@ -354,6 +371,9 @@ static int load_and_attach_bpf(const char *bpf_obj_path, const char *pin_dir, st
     /* Pin events ringbuf */
     ctx->map_events = bpf_object__find_map_by_name(ctx->obj, "moray_events");
     if (ctx->map_events) {
+        if (access(e_pin, F_OK) == 0) {
+            fprintf(stdout, "[*] Stale pin detected for '%s'; unlinking and recovering fresh pin...\n", e_pin);
+        }
         unlink(e_pin);
         err = bpf_map__pin(ctx->map_events, e_pin);
         if (err) {
@@ -366,6 +386,9 @@ static int load_and_attach_bpf(const char *bpf_obj_path, const char *pin_dir, st
     /* Pin xdp drop map */
     ctx->map_xdp_drop = bpf_object__find_map_by_name(ctx->obj, "moray_xdp_drop_map");
     if (ctx->map_xdp_drop) {
+        if (access(x_pin, F_OK) == 0) {
+            fprintf(stdout, "[*] Stale pin detected for '%s'; unlinking and recovering fresh pin...\n", x_pin);
+        }
         unlink(x_pin);
         err = bpf_map__pin(ctx->map_xdp_drop, x_pin);
         if (err) {
@@ -378,6 +401,9 @@ static int load_and_attach_bpf(const char *bpf_obj_path, const char *pin_dir, st
     /* Pin cgroup map */
     ctx->map_cgroup = bpf_object__find_map_by_name(ctx->obj, "moray_cgroup_map");
     if (ctx->map_cgroup) {
+        if (access(c_pin, F_OK) == 0) {
+            fprintf(stdout, "[*] Stale pin detected for '%s'; unlinking and recovering fresh pin...\n", c_pin);
+        }
         unlink(c_pin);
         err = bpf_map__pin(ctx->map_cgroup, c_pin);
         if (err) {
@@ -390,6 +416,9 @@ static int load_and_attach_bpf(const char *bpf_obj_path, const char *pin_dir, st
     /* Pin autonomous boundary map */
     ctx->map_boundary = bpf_object__find_map_by_name(ctx->obj, "moray_boundary_map");
     if (ctx->map_boundary) {
+        if (access(b_pin, F_OK) == 0) {
+            fprintf(stdout, "[*] Stale pin detected for '%s'; unlinking and recovering fresh pin...\n", b_pin);
+        }
         unlink(b_pin);
         err = bpf_map__pin(ctx->map_boundary, b_pin);
         if (err) {
@@ -402,6 +431,9 @@ static int load_and_attach_bpf(const char *bpf_obj_path, const char *pin_dir, st
     /* Pin governed workload map (Milestone 2) */
     ctx->map_workload = bpf_object__find_map_by_name(ctx->obj, "moray_workload_map");
     if (ctx->map_workload) {
+        if (access(w_pin, F_OK) == 0) {
+            fprintf(stdout, "[*] Stale pin detected for '%s'; unlinking and recovering fresh pin...\n", w_pin);
+        }
         unlink(w_pin);
         err = bpf_map__pin(ctx->map_workload, w_pin);
         if (err) {
@@ -927,6 +959,179 @@ static int seed_boundary_manifest(int map_fd, int map_workload_fd, const char *m
     return count;
 }
 
+/*
+ * Emergency Map Pin Cleanup CLI
+ */
+static int run_clean_pins_cli(const char *pin_dir) {
+    if (!pin_dir) pin_dir = MORAY_PIN_DIR;
+    const char *names[] = {
+        "quarantine_map",
+        "events",
+        "xdp_drop_map",
+        "cgroup_map",
+        "boundary_map",
+        "workload_map"
+    };
+    int unlinked = 0;
+    fprintf(stdout, "[*] Emergency Map Pin Cleanup targeting: %s\n", pin_dir);
+    for (size_t i = 0; i < sizeof(names)/sizeof(names[0]); i++) {
+        char p[256];
+        snprintf(p, sizeof(p), "%s/%s", pin_dir, names[i]);
+        if (access(p, F_OK) == 0) {
+            if (unlink(p) == 0) {
+                fprintf(stdout, "[+] Unlinked pinned map: %s\n", p);
+                unlinked++;
+            } else {
+                fprintf(stderr, "[-] Failed to unlink '%s': %s\n", p, strerror(errno));
+            }
+        }
+    }
+    fprintf(stdout, "[+] Emergency pin cleanup complete. Unlinked %d pins.\n", unlinked);
+    return 0;
+}
+
+/*
+ * Subsystem Health & Readiness Probe CLI
+ */
+static int run_healthcheck_cli(const char *pin_dir, bool mock_mode, bool json_output, bool readiness_only) {
+    (void)readiness_only;
+    if (!pin_dir) pin_dir = MORAY_PIN_DIR;
+
+    bool bpf_lsm_active = false;
+    bool bpffs_mounted = false;
+    bool maps_ok[6] = {false, false, false, false, false, false};
+    const char *map_names[6] = {
+        "quarantine_map",
+        "events",
+        "xdp_drop_map",
+        "cgroup_map",
+        "boundary_map",
+        "workload_map"
+    };
+    char warnings[8][128];
+    int warn_count = 0;
+
+    /* 1. Check LSM */
+    if (mock_mode) {
+        bpf_lsm_active = true;
+    } else {
+        int lfd = open("/sys/kernel/security/lsm", O_RDONLY);
+        if (lfd >= 0) {
+            char buf[256] = {0};
+            ssize_t n = read(lfd, buf, sizeof(buf) - 1);
+            close(lfd);
+            if (n > 0 && strstr(buf, "bpf") != NULL) {
+                bpf_lsm_active = true;
+            } else {
+                if (warn_count < 8)
+                    snprintf(warnings[warn_count++], sizeof(warnings[0]), "BPF-LSM not active in /sys/kernel/security/lsm");
+            }
+        } else {
+            if (warn_count < 8)
+                snprintf(warnings[warn_count++], sizeof(warnings[0]), "Cannot access /sys/kernel/security/lsm: %s", strerror(errno));
+        }
+    }
+
+    /* 2. Check bpffs */
+    if (mock_mode) {
+        bpffs_mounted = true;
+    } else {
+        struct statfs fs;
+        if (statfs("/sys/fs/bpf", &fs) == 0 && (unsigned long)fs.f_type == (unsigned long)BPF_FS_MAGIC) {
+            bpffs_mounted = true;
+        } else {
+            if (warn_count < 8)
+                snprintf(warnings[warn_count++], sizeof(warnings[0]), "/sys/fs/bpf is not mounted as bpffs");
+        }
+    }
+
+    /* 3. Check each map */
+    int maps_accessible_count = 0;
+    for (int i = 0; i < 6; i++) {
+        char map_path[256];
+        snprintf(map_path, sizeof(map_path), "%s/%s", pin_dir, map_names[i]);
+        if (mock_mode) {
+            if (access(map_path, R_OK | W_OK) == 0) {
+                maps_ok[i] = true;
+                maps_accessible_count++;
+            } else {
+                if (warn_count < 8) {
+                    snprintf(warnings[warn_count++], sizeof(warnings[0]), "Mock map '%s' inaccessible", map_names[i]);
+                }
+            }
+        } else {
+            int fd = bpf_obj_get(map_path);
+            if (fd >= 0) {
+                maps_ok[i] = true;
+                maps_accessible_count++;
+                close(fd);
+            } else {
+                if (warn_count < 8) {
+                    snprintf(warnings[warn_count++], sizeof(warnings[0]), "Pinned map '%s' inaccessible (%s)", map_names[i], strerror(errno));
+                }
+            }
+        }
+    }
+
+    /* Evaluate status */
+    const char *status = "HEALTHY";
+    bool ready = true;
+
+    if (!bpf_lsm_active || !bpffs_mounted) {
+        status = "UNHEALTHY";
+        ready = false;
+    } else if (maps_accessible_count == 6) {
+        status = "HEALTHY";
+        ready = true;
+    } else if (maps_accessible_count >= 1) {
+        status = "DEGRADED";
+        ready = false;
+    } else {
+        status = "UNHEALTHY";
+        ready = false;
+    }
+
+    if (json_output) {
+        fprintf(stdout, "{\n");
+        fprintf(stdout, "  \"status\": \"%s\",\n", status);
+        fprintf(stdout, "  \"ready\": %s,\n", ready ? "true" : "false");
+        fprintf(stdout, "  \"mock_mode\": %s,\n", mock_mode ? "true" : "false");
+        fprintf(stdout, "  \"pin_dir\": \"%s\",\n", pin_dir);
+        fprintf(stdout, "  \"bpf_lsm_active\": %s,\n", bpf_lsm_active ? "true" : "false");
+        fprintf(stdout, "  \"bpffs_mounted\": %s,\n", bpffs_mounted ? "true" : "false");
+        fprintf(stdout, "  \"maps\": {\n");
+        for (int i = 0; i < 6; i++) {
+            fprintf(stdout, "    \"%s\": %s%s\n", map_names[i], maps_ok[i] ? "true" : "false", (i < 5) ? "," : "");
+        }
+        fprintf(stdout, "  },\n");
+        fprintf(stdout, "  \"maps_accessible\": %d,\n", maps_accessible_count);
+        fprintf(stdout, "  \"warnings\": [");
+        for (int i = 0; i < warn_count; i++) {
+            fprintf(stdout, "\"%s\"%s", warnings[i], (i < warn_count - 1) ? ", " : "");
+        }
+        fprintf(stdout, "]\n");
+        fprintf(stdout, "}\n");
+    } else {
+        print_banner();
+        fprintf(stdout, "[*] Health & Readiness Probe targeting: %s\n", pin_dir);
+        fprintf(stdout, "[-] Overall Status: %s (Ready: %s)\n", status, ready ? "YES" : "NO");
+        fprintf(stdout, "[-] BPF-LSM Kernel Security Module: %s\n", bpf_lsm_active ? "ACTIVE" : "INACTIVE");
+        fprintf(stdout, "[-] BPF Virtual Filesystem: %s\n", bpffs_mounted ? "MOUNTED" : "UNMOUNTED");
+        fprintf(stdout, "[-] Pinned Maps (%d/6 accessible):\n", maps_accessible_count);
+        for (int i = 0; i < 6; i++) {
+            fprintf(stdout, "    * %-16s : %s\n", map_names[i], maps_ok[i] ? "ONLINE" : "OFFLINE");
+        }
+        if (warn_count > 0) {
+            fprintf(stdout, "[-] Warnings (%d):\n", warn_count);
+            for (int i = 0; i < warn_count; i++) {
+                fprintf(stdout, "    ! %s\n", warnings[i]);
+            }
+        }
+    }
+
+    return ready ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
     /* Line-buffered stdout and unbuffered stderr for real-time logging */
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -935,6 +1140,11 @@ int main(int argc, char **argv) {
     bool mock_mode = false;
     bool auto_harden = false;
     bool enforce_unreviewed = false;
+    bool run_health = false;
+    bool run_readiness = false;
+    bool run_clean_pins = false;
+    bool json_output = false;
+    const char *validate_manifest_path = NULL;
     const char *manifest_path = NULL;
     const char *cgroup_target = NULL;
     const char *pin_dir = MORAY_PIN_DIR;
@@ -952,22 +1162,34 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             fprintf(stdout, "Usage: %s [options]\n", argv[0]);
             fprintf(stdout, "Options:\n");
-            fprintf(stdout, "  --mock [dir]     Run in mock mode using filesystem backing (for unprivileged testing)\n");
-            fprintf(stdout, "  --preflight      Execute live kernel preflight checks and exit\n");
-            fprintf(stdout, "  --auto-harden [file] Enable zero-config autonomous boundary defense (default: ./moray_boundary.json)\n");
-            fprintf(stdout, "  --enforce-unreviewed Enable auto-hardening for unreviewed suggestion manifests\n");
+            fprintf(stdout, "  --mock [dir]               Run in mock mode using filesystem backing (for unprivileged testing)\n");
+            fprintf(stdout, "  --preflight                Execute live kernel preflight checks and exit\n");
+            fprintf(stdout, "  --health                   Probe live subsystem containment health and exit (0: healthy, 1: degraded/unhealthy)\n");
+            fprintf(stdout, "  --readiness                Probe live subsystem readiness for agent workloads and exit\n");
+            fprintf(stdout, "  --clean-pins               Emergency purge/unlink of all pinned kernel maps in pin directory and exit\n");
+            fprintf(stdout, "  --json                     Format health/readiness probe output as structured JSON\n");
+            fprintf(stdout, "  --auto-harden [file]       Enable zero-config autonomous boundary defense (default: ./moray_boundary.json)\n");
+            fprintf(stdout, "  --enforce-unreviewed       Enable auto-hardening for unreviewed suggestion manifests\n");
             fprintf(stdout, "  --validate-manifest <file> Validate manifest against strict schema and exit\n");
-            fprintf(stdout, "  --cgroup <dir|id> Scope autonomous boundary to specific cgroup v2 slice or ID\n");
-            fprintf(stdout, "  --pin-dir <dir>  Override default BPF pin directory (default: %s)\n", MORAY_PIN_DIR);
-            fprintf(stdout, "  --bpf-obj <path> Path to compiled BPF object (default: build/moray_kern.bpf.o)\n");
-            fprintf(stdout, "  --iface <dev>    Attach XDP wire filter to network interface (e.g. eth0, lo)\n");
-            fprintf(stdout, "  --help           Show this help message\n");
+            fprintf(stdout, "  --cgroup <dir|id>          Scope autonomous boundary to specific cgroup v2 slice or ID\n");
+            fprintf(stdout, "  --pin-dir <dir>            Override default BPF pin directory (default: %s)\n", MORAY_PIN_DIR);
+            fprintf(stdout, "  --bpf-obj <path>           Path to compiled BPF object (default: build/moray_kern.bpf.o)\n");
+            fprintf(stdout, "  --iface <dev>              Attach XDP wire filter to network interface (e.g. eth0, lo)\n");
+            fprintf(stdout, "  --help                     Show this help message\n");
             return 0;
         } else if (strcmp(argv[i], "--preflight") == 0) {
             print_banner();
             return (run_kernel_preflight_checks() == 0) ? 0 : 1;
         } else if (strcmp(argv[i], "--validate-manifest") == 0 && i + 1 < argc) {
-            return run_validate_manifest_cli(argv[++i]);
+            validate_manifest_path = argv[++i];
+        } else if (strcmp(argv[i], "--health") == 0) {
+            run_health = true;
+        } else if (strcmp(argv[i], "--readiness") == 0) {
+            run_readiness = true;
+        } else if (strcmp(argv[i], "--clean-pins") == 0 || strcmp(argv[i], "--flush-pins") == 0) {
+            run_clean_pins = true;
+        } else if (strcmp(argv[i], "--json") == 0) {
+            json_output = true;
         } else if (strcmp(argv[i], "--enforce-unreviewed") == 0) {
             enforce_unreviewed = true;
         } else if (strcmp(argv[i], "--auto-harden") == 0) {
@@ -993,6 +1215,16 @@ int main(int argc, char **argv) {
             strncpy(bpf_ctx.iface, dev, sizeof(bpf_ctx.iface) - 1);
             bpf_ctx.iface[sizeof(bpf_ctx.iface) - 1] = '\0';
         }
+    }
+
+    if (validate_manifest_path) {
+        return run_validate_manifest_cli(validate_manifest_path);
+    }
+    if (run_clean_pins) {
+        return run_clean_pins_cli(pin_dir);
+    }
+    if (run_health || run_readiness) {
+        return run_healthcheck_cli(pin_dir, mock_mode, json_output, run_readiness);
     }
 
     print_banner();
@@ -1045,6 +1277,7 @@ int main(int argc, char **argv) {
     if (mock_mode) {
         fprintf(stdout, "[*] Running in mock containment test mode...\n");
         if (init_mock_quarantine(quarantine_path) != 0 ||
+            init_mock_events(events_path) != 0 ||
             init_mock_xdp(xdp_path) != 0 ||
             init_mock_cgroup(cgroup_path) != 0 ||
             init_mock_boundary(boundary_path) != 0 ||

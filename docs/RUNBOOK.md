@@ -370,19 +370,16 @@ python3 /usr/local/bin/lobster-hook --flush-all --force --json
 *Note:* The `--force` flag is mandatory. Running `--flush-all` without `--force` immediately fails closed with exit code `252`.
 
 ### DR-02: Corrupted Map State Recovery
-If `/sys/fs/bpf/moray/quarantine_map`, `/sys/fs/bpf/moray/xdp_drop_map`, or `/sys/fs/bpf/moray/cgroup_map` becomes corrupted due to abnormal hypervisor termination or filesystem failure:
+If `/sys/fs/bpf/moray/quarantine_map`, `/sys/fs/bpf/moray/xdp_drop_map`, `/sys/fs/bpf/moray/cgroup_map`, `/sys/fs/bpf/moray/boundary_map`, or `/sys/fs/bpf/moray/workload_map` becomes corrupted due to abnormal hypervisor termination or filesystem failure:
 
 1. **Stop the Daemon**:
    ```bash
    systemctl stop morayd.service
    ```
 
-2. **Remove Pinned Maps**:
+2. **Clean Pinned Maps (Zero-Dependency Emergency Cleanup)**:
    ```bash
-   rm -f /sys/fs/bpf/moray/quarantine_map
-   rm -f /sys/fs/bpf/moray/events
-   rm -f /sys/fs/bpf/moray/xdp_drop_map
-   rm -f /sys/fs/bpf/moray/cgroup_map
+   /usr/local/bin/morayd --clean-pins --pin-dir /sys/fs/bpf/moray
    ```
 
 3. **Restart the Daemon**:
@@ -401,7 +398,7 @@ If the daemon is unresponsive and kernel LSM hooks must be detached immediately 
 
 2. **Unpin All BPF Objects**:
    ```bash
-   rm -rf /sys/fs/bpf/moray
+   /usr/local/bin/morayd --clean-pins --pin-dir /sys/fs/bpf/moray || rm -rf /sys/fs/bpf/moray
    ```
 
 3. **Detach and Unload Residual BPF Programs via `bpftool`**:
@@ -416,6 +413,15 @@ If the daemon is unresponsive and kernel LSM hooks must be detached immediately 
 4. **Verify Host Stability**:
    ```bash
    dmesg | tail -n 20
+   ```
+
+### DR-04: Daemon Crash & Zero-Downtime Workload Recovery
+If `morayd` crashes unexpectedly under active agent execution:
+1. Active kernel maps in `/sys/fs/bpf/moray` remain anchored in `bpffs`.
+2. When `morayd` is restarted (or triggered by systemd `Restart=on-failure`), `morayd` detects existing pins, recovers them cleanly, and re-attaches LSM hooks without causing `-EEXIST` or leaking file descriptors.
+3. Validate recovery immediately using:
+   ```bash
+   morayd --health --json
    ```
 
 ### IR-08: Autonomous Boundary Tuning & Emergency Overrides
@@ -456,6 +462,26 @@ If `morayd` is running in autonomous zero-configuration mode (`--auto-harden`) a
        key hex 5f 5f 6d 6f 72 61 79 5f 61 75 74 6f 5f 5f 00 00
    ```
    *Result:* Invariant $I_9$ sentinel is removed. Ring 0 LSM instantly falls back to standard manual quarantine mode ($I_1$), restoring benign unimpeded execution ($I_2$) across all non-flagged binaries in $O(1)$ time.
+
+### IR-09: Subsystem Health & Readiness Diagnostic Probing
+To perform live liveness or readiness health checks for orchestrators, containers, or monitoring daemons:
+
+1. **Native C Daemon Probe**:
+   ```bash
+   # Human-readable status check
+   morayd --health
+   
+   # Structured JSON mode (for Prometheus/Consul/Kubernetes probes)
+   morayd --health --json
+   
+   # Readiness probe (fails closed with exit code 1 if any map offline)
+   morayd --readiness
+   ```
+
+2. **Python Bridge Probe**:
+   ```bash
+   python3 bridge/lobster_hook.py --healthcheck --json
+   ```
 
 ---
 

@@ -1249,13 +1249,16 @@ class MorayHook:
     def healthcheck(self) -> dict[str, object]:
         """
         Comprehensive operational liveness and readiness probe.
-        Evaluates bpffs mount, quarantine map presence, and LSM status.
+        Evaluates bpffs mount, quarantine map presence, boundary/workload maps, and LSM status.
         """
         warnings: list[str] = []
         status: str = "healthy"
         map_accessible = False
         xdp_accessible = False
         cgroup_accessible = False
+        boundary_accessible = False
+        workload_accessible = False
+        events_accessible = False
         bpffs_mounted = False
         bpf_lsm_active = False
 
@@ -1263,6 +1266,9 @@ class MorayHook:
             map_accessible = True
             xdp_accessible = True
             cgroup_accessible = True
+            boundary_accessible = True
+            workload_accessible = True
+            events_accessible = True
             bpffs_mounted = True
             bpf_lsm_active = True
         else:
@@ -1274,9 +1280,28 @@ class MorayHook:
 
             if os.path.exists(self.xdp_map_path):
                 xdp_accessible = True
+            else:
+                warnings.append(f"XDP drop map pin not found: {self.xdp_map_path}")
 
             if os.path.exists(self.cgroup_map_path):
                 cgroup_accessible = True
+            else:
+                warnings.append(f"Cgroup map pin not found: {self.cgroup_map_path}")
+
+            if os.path.exists(self.boundary_map_path):
+                boundary_accessible = True
+            else:
+                warnings.append(f"Boundary map pin not found: {self.boundary_map_path}")
+                status = "degraded"
+
+            if os.path.exists(self.workload_map_path):
+                workload_accessible = True
+            else:
+                warnings.append(f"Workload map pin not found: {self.workload_map_path}")
+                status = "degraded"
+
+            if os.path.exists(self.events_path):
+                events_accessible = True
 
             if os.path.exists("/sys/fs/bpf"):
                 bpffs_mounted = True
@@ -1303,8 +1328,29 @@ class MorayHook:
                 warnings.append(f"{lsm_path} not found (securityfs not mounted)")
                 status = "degraded"
 
+        ready = (
+            status == "healthy"
+            and map_accessible
+            and cgroup_accessible
+            and boundary_accessible
+            and workload_accessible
+            and bpf_lsm_active
+            and bpffs_mounted
+        )
+
+        try:
+            boundary_count = len(self.list_boundary_entries())
+        except Exception:  # noqa: BLE001
+            boundary_count = 0
+
+        try:
+            workload_count = len(self.list_workloads())
+        except Exception:  # noqa: BLE001
+            workload_count = 0
+
         return {
             "status": status,
+            "ready": ready,
             "mock_mode": self.mock_mode,
             "map_path": self.map_path,
             "map_accessible": map_accessible,
@@ -1312,11 +1358,19 @@ class MorayHook:
             "xdp_accessible": xdp_accessible,
             "cgroup_map_path": self.cgroup_map_path,
             "cgroup_accessible": cgroup_accessible,
+            "boundary_map_path": self.boundary_map_path,
+            "boundary_accessible": boundary_accessible,
+            "workload_map_path": self.workload_map_path,
+            "workload_accessible": workload_accessible,
+            "events_path": self.events_path,
+            "events_accessible": events_accessible,
             "bpffs_mounted": bpffs_mounted,
             "bpf_lsm_active": bpf_lsm_active,
             "quarantined_count": len(self.list_quarantined()),
             "xdp_dropped_count": len(self.xdp_list_dropped()),
             "cgroup_quarantined_count": len(self.list_quarantined_cgroups()),
+            "boundary_count": boundary_count,
+            "workload_count": workload_count,
             "warnings": warnings,
         }
 
@@ -2601,6 +2655,11 @@ def main(prog_desc: str | None = None) -> None:
         "--healthcheck", action="store_true", help="Run operational healthcheck and liveness probe"
     )
     parser.add_argument(
+        "--readiness",
+        action="store_true",
+        help="Run operational readiness probe for agent workloads",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Confirm intent for destructive emergency operations like --flush-all",
@@ -3146,24 +3205,31 @@ def main(prog_desc: str | None = None) -> None:
                 print(json.dumps({"status": "flushed", "count": flushed}))
             else:
                 print(f"[!] BREAK-GLASS FLUSH: Purged {flushed} quarantine entries.")
-        elif args.healthcheck:
+        elif args.healthcheck or args.readiness:
             health = hook.healthcheck()
             if args.json:
                 print(json.dumps(health, indent=2))
             else:
                 print(f"[*] Moray Containment Health: {health['status'].upper()}")
+                print(f"  Ready:            {health['ready']}")
                 print(f"  Mock Mode:        {health['mock_mode']}")
                 print(f"  Map Path:         {health['map_path']}")
                 print(f"  Map Accessible:   {health['map_accessible']}")
+                print(f"  Boundary Pin:     {health['boundary_map_path']}")
+                print(f"  Boundary Online:  {health['boundary_accessible']}")
+                print(f"  Workload Pin:     {health['workload_map_path']}")
+                print(f"  Workload Online:  {health['workload_accessible']}")
                 print(f"  BPFFS Mounted:    {health['bpffs_mounted']}")
                 print(f"  BPF-LSM Active:   {health['bpf_lsm_active']}")
                 print(f"  Quarantined PIDs: {health['quarantined_count']}")
+                print(f"  Boundaries:       {health['boundary_count']}")
+                print(f"  Workloads:        {health['workload_count']}")
                 warnings_list = health.get("warnings", [])
                 if warnings_list and isinstance(warnings_list, list):
                     print("  Warnings:")
                     for w in warnings_list:
                         print(f"    - {w}")
-            sys.exit(0 if health["status"] == "healthy" else 1)
+            sys.exit(0 if health["ready"] else 1)
         elif args.list:
             entries = hook.list_quarantined()
             if args.json:
