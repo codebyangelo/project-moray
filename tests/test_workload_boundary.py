@@ -30,6 +30,8 @@ from bridge.moray_hook import (
     MORAY_PERM_SOCKET,
     MORAY_WORKLOAD_ACTIVE,
     MORAY_WORKLOAD_INHERIT_CHILDREN,
+    MorayBoundaryEntry,
+    MorayBoundaryKey,
     MorayHook,
     MorayQuarantineError,
 )
@@ -294,3 +296,150 @@ class TestWorkloadCLI:
         data_rel = json.loads(res_rel.stdout)
         assert data_rel["status"] == "released"
         assert data_rel["cgroup_id"] == 5001
+
+
+class TestHeterogeneousWorkloadBoundary:
+    """
+    Verifies Compound-Key Workload Boundary Whitelisting:
+    Workload Alpha and Workload Beta have distinct, isolated executable whitelists.
+    Binary allowed in Alpha is strictly denied in Beta.
+    """
+
+    def test_heterogeneous_isolated_whitelists(self, tmp_path: Path) -> None:
+        hook = MorayHook(
+            workload_map_path=str(tmp_path / "workload.bin"),
+            boundary_map_path=str(tmp_path / "boundary.bin"),
+            mock_mode=True,
+        )
+
+        # Workload Alpha (ID 1000): Agent Alpha (allowed: python3, bash)
+        hook.register_workload(1000, posture="REQUIRE_WAN")
+        # Workload Beta (ID 2000): Agent Beta (allowed: curl, ls)
+        hook.register_workload(2000, posture="DENY_ALL_NET")
+
+        # Assert MorayBoundaryKey compound key layout in Python ctypes
+        import ctypes
+
+        assert ctypes.sizeof(MorayBoundaryKey) == 24
+        key_alpha = MorayBoundaryKey(cgroup_id=1000, comm=b"python3")
+        assert key_alpha.cgroup_id == 1000
+        assert key_alpha.comm.startswith(b"python3")
+
+        # Seed Workload Alpha boundaries
+        hook._mock_boundary_table[(1000, "python3")] = MorayBoundaryEntry(
+            perm_flags=MORAY_PERM_EXEC, reserved=0, hit_count=0
+        )
+        hook._mock_boundary_table[(1000, "bash")] = MorayBoundaryEntry(
+            perm_flags=MORAY_PERM_EXEC, reserved=0, hit_count=0
+        )
+
+        # Seed Workload Beta boundaries
+        hook._mock_boundary_table[(2000, "curl")] = MorayBoundaryEntry(
+            perm_flags=MORAY_PERM_EXEC, reserved=0, hit_count=0
+        )
+        hook._mock_boundary_table[(2000, "ls")] = MorayBoundaryEntry(
+            perm_flags=MORAY_PERM_EXEC, reserved=0, hit_count=0
+        )
+
+        # Seed host-wide daemon (cgroup_id = 0)
+        hook._mock_boundary_table[(0, "morayd")] = MorayBoundaryEntry(
+            perm_flags=MORAY_PERM_ALL, reserved=0, hit_count=0
+        )
+
+        def evaluate(cgroup_id: int, comm: str) -> tuple[bool, str]:
+            w_entry = hook.get_workload_entry(cgroup_id)
+            if w_entry is None or not (w_entry.flags & MORAY_WORKLOAD_ACTIVE):
+                return True, "BYPASS_UNGOVERNED"
+
+            # Check compound key lookup mirroring lookup_boundary_entry()
+            entry = hook.get_boundary_entry(comm, cgroup_id=cgroup_id)
+            if entry and (entry.perm_flags & MORAY_PERM_EXEC):
+                return True, "ALLOWED_WHITELIST"
+            return False, "DENIED_BOUNDARY"
+
+        # 1. Workload Alpha: python3 is permitted
+        ok, reason = evaluate(1000, "python3")
+        assert ok and reason == "ALLOWED_WHITELIST"
+
+        # 2. Workload Beta: python3 is DENIED (not in Beta's whitelist!)
+        ok, reason = evaluate(2000, "python3")
+        assert not ok and reason == "DENIED_BOUNDARY"
+
+        # 3. Workload Beta: curl is permitted
+        ok, reason = evaluate(2000, "curl")
+        assert ok and reason == "ALLOWED_WHITELIST"
+
+        # 4. Workload Alpha: curl is DENIED (not in Alpha's whitelist!)
+        ok, reason = evaluate(1000, "curl")
+        assert not ok and reason == "DENIED_BOUNDARY"
+
+        # 5. Host-wide daemon morayd is permitted across both
+        ok, reason = evaluate(1000, "morayd")
+        assert ok and reason == "ALLOWED_WHITELIST"
+        ok, reason = evaluate(2000, "morayd")
+        assert ok and reason == "ALLOWED_WHITELIST"
+
+        # 6. Ungoverned process (cgroup 9999) bypasses boundary
+        ok, reason = evaluate(9999, "unlisted_tool")
+        assert ok and reason == "BYPASS_UNGOVERNED"
+
+    def test_apply_manifest_multi_workload(self, tmp_path: Path) -> None:
+        hook = MorayHook(
+            workload_map_path=str(tmp_path / "workload.bin"),
+            boundary_map_path=str(tmp_path / "boundary.bin"),
+            mock_mode=True,
+        )
+
+        manifest_alpha = tmp_path / "manifest_alpha.json"
+        manifest_alpha.write_text(
+            json.dumps(
+                {
+                    "version": "1.0.0",
+                    "target_name": "agent-alpha",
+                    "policy_state": "ENFORCED",
+                    "boundary_policy": {
+                        "default_action": "AUTONOMOUS_STRIKE",
+                        "allowed_comms": ["python3", "bash"],
+                        "network_posture": "REQUIRE_WAN",
+                    },
+                }
+            )
+        )
+
+        manifest_beta = tmp_path / "manifest_beta.json"
+        manifest_beta.write_text(
+            json.dumps(
+                {
+                    "version": "1.0.0",
+                    "target_name": "agent-beta",
+                    "policy_state": "ENFORCED",
+                    "boundary_policy": {
+                        "default_action": "AUTONOMOUS_STRIKE",
+                        "allowed_comms": ["curl", "ls"],
+                        "network_posture": "DENY_ALL_NET",
+                    },
+                }
+            )
+        )
+
+        # Ingest both manifests targeting distinct cgroups
+        c_alpha = hook.apply_boundary_manifest(str(manifest_alpha), cgroup_target=1001)
+        c_beta = hook.apply_boundary_manifest(str(manifest_beta), cgroup_target=2002)
+
+        assert c_alpha == 2
+        assert c_beta == 2
+
+        # Verify Workload Alpha state
+        entry_alpha_py = hook.get_boundary_entry("python3", cgroup_id=1001)
+        assert entry_alpha_py is not None
+        assert entry_alpha_py.perm_flags & MORAY_PERM_EXEC
+
+        entry_beta_py = hook.get_boundary_entry("python3", cgroup_id=2002)
+        assert entry_beta_py is None  # Not allowed in Beta!
+
+        entry_beta_curl = hook.get_boundary_entry("curl", cgroup_id=2002)
+        assert entry_beta_curl is not None
+        assert entry_beta_curl.perm_flags & MORAY_PERM_EXEC
+
+        entry_alpha_curl = hook.get_boundary_entry("curl", cgroup_id=1001)
+        assert entry_alpha_curl is None  # Not allowed in Alpha!

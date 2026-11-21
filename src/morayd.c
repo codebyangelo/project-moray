@@ -191,7 +191,7 @@ static int init_mock_boundary(const char *path) {
         return -1;
     }
 
-    size_t table_size = MORAY_MAX_ENTRIES * (MORAY_COMM_LEN + sizeof(struct moray_boundary_entry));
+    size_t table_size = MORAY_MAX_ENTRIES * (sizeof(struct moray_boundary_key) + sizeof(struct moray_boundary_entry));
     if (ftruncate(fd, (off_t)table_size) != 0) {
         fprintf(stderr, "[-] Failed to preallocate mock boundary table: %s\n", strerror(errno));
         close(fd);
@@ -512,12 +512,13 @@ static void seed_default_boundary(int map_fd, int map_workload_fd, const char *c
     const char *defaults[] = {
         "morayd", "victim_worker", "bash", "sh", "python", "python3", "make", "gcc", "clang", "tcc", "cat", "ls", "rm", "mkdir", "true"
     };
-    char sentinel_key[MORAY_COMM_LEN] = "__moray_auto__";
+    struct moray_boundary_key sentinel_key = { .cgroup_id = 0, .comm = "__moray_auto__" };
     struct moray_boundary_entry sentinel_val = { .perm_flags = MORAY_PERM_EXEC | MORAY_PERM_LOOPBACK, .reserved = MORAY_BOUNDARY_FLAG_HOSTWIDE, .hit_count = 0 };
 
     __u64 target_cgroup_id = resolve_cgroup_identifier(cgroup_target);
     if (target_cgroup_id > 0 && map_workload_fd >= 0) {
         sentinel_val.reserved = MORAY_BOUNDARY_FLAG_WORKLOAD;
+        sentinel_key.cgroup_id = target_cgroup_id;
         struct moray_workload_entry w_entry = {
             .posture_flags = sentinel_val.perm_flags,
             .flags = MORAY_WORKLOAD_ACTIVE | MORAY_WORKLOAD_INHERIT_CHILDREN,
@@ -529,19 +530,19 @@ static void seed_default_boundary(int map_fd, int map_workload_fd, const char *c
                 (unsigned long long)target_cgroup_id, cgroup_target ? cgroup_target : "cgroup");
     }
 
-    bpf_map_update_elem(map_fd, sentinel_key, &sentinel_val, BPF_ANY);
+    bpf_map_update_elem(map_fd, &sentinel_key, &sentinel_val, BPF_ANY);
 
     size_t count = sizeof(defaults) / sizeof(defaults[0]);
     for (size_t i = 0; i < count; i++) {
-        char key[MORAY_COMM_LEN] = {0};
-        strncpy(key, defaults[i], sizeof(key) - 1);
+        struct moray_boundary_key key = { .cgroup_id = target_cgroup_id, .comm = {0} };
+        strncpy(key.comm, defaults[i], sizeof(key.comm) - 1);
         struct moray_boundary_entry val = { .perm_flags = MORAY_PERM_EXEC, .reserved = 0, .hit_count = 0 };
-        bpf_map_update_elem(map_fd, key, &val, BPF_ANY);
+        bpf_map_update_elem(map_fd, &key, &val, BPF_ANY);
     }
 
-    char self_comm[MORAY_COMM_LEN] = "morayd";
+    struct moray_boundary_key self_key = { .cgroup_id = 0, .comm = "morayd" };
     struct moray_boundary_entry self_val = { .perm_flags = MORAY_PERM_ALL, .reserved = 0, .hit_count = 0 };
-    bpf_map_update_elem(map_fd, self_comm, &self_val, BPF_ANY);
+    bpf_map_update_elem(map_fd, &self_key, &self_val, BPF_ANY);
 
     fprintf(stdout, "[+] Auto-Harden: Seeded %zu default executables into boundary_map.\n", count);
     if (target_cgroup_id > 0) {
@@ -894,7 +895,6 @@ static int seed_boundary_manifest(int map_fd, int map_workload_fd, const char *m
     int allow_wan = (strcmp(parsed.network_posture, "REQUIRE_WAN") == 0);
     int deny_all = (strcmp(parsed.network_posture, "DENY_ALL_NET") == 0);
 
-    char sentinel_key[MORAY_COMM_LEN] = "__moray_auto__";
     struct moray_boundary_entry sentinel_val;
     memset(&sentinel_val, 0, sizeof(sentinel_val));
     if (allow_wan) {
@@ -931,22 +931,35 @@ static int seed_boundary_manifest(int map_fd, int map_workload_fd, const char *m
         sentinel_val.reserved = MORAY_BOUNDARY_FLAG_HOSTWIDE;
     }
 
-    bpf_map_update_elem(map_fd, sentinel_key, &sentinel_val, BPF_ANY);
+    struct moray_boundary_key sentinel_key;
+    memset(&sentinel_key, 0, sizeof(sentinel_key));
+    sentinel_key.cgroup_id = target_cgroup_id;
+    strncpy(sentinel_key.comm, "__moray_auto__", sizeof(sentinel_key.comm) - 1);
+
+    bpf_map_update_elem(map_fd, &sentinel_key, &sentinel_val, BPF_ANY);
 
     int count = 0;
     for (int i = 0; i < parsed.comm_count; i++) {
+        struct moray_boundary_key entry_key;
+        memset(&entry_key, 0, sizeof(entry_key));
+        entry_key.cgroup_id = target_cgroup_id;
+        strncpy(entry_key.comm, parsed.comms[i], sizeof(entry_key.comm) - 1);
+
         struct moray_boundary_entry entry;
         memset(&entry, 0, sizeof(entry));
         entry.perm_flags = allow_wan ? MORAY_PERM_ALL : MORAY_PERM_EXEC;
-        bpf_map_update_elem(map_fd, parsed.comms[i], &entry, BPF_ANY);
+        bpf_map_update_elem(map_fd, &entry_key, &entry, BPF_ANY);
         count++;
     }
 
-    char self_comm[MORAY_COMM_LEN] = "morayd";
+    struct moray_boundary_key self_key;
+    memset(&self_key, 0, sizeof(self_key));
+    self_key.cgroup_id = 0;
+    strncpy(self_key.comm, "morayd", sizeof(self_key.comm) - 1);
     struct moray_boundary_entry self_val;
     memset(&self_val, 0, sizeof(self_val));
     self_val.perm_flags = MORAY_PERM_ALL;
-    bpf_map_update_elem(map_fd, self_comm, &self_val, BPF_ANY);
+    bpf_map_update_elem(map_fd, &self_key, &self_val, BPF_ANY);
 
     free(buf);
     fprintf(stdout, "[+] Auto-Harden: Successfully seeded %d allowed executables from %s (Policy State: %s)\n",
